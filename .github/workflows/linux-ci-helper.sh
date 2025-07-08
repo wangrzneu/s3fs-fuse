@@ -185,7 +185,7 @@ elif [ "${CONTAINER_FULLNAME}" = "alpine:3.22" ]; then
     PACKAGE_UPDATE_OPTIONS="update --no-progress"
     PACKAGE_INSTALL_OPTIONS="add --no-progress --no-cache"
 
-    INSTALL_PACKAGES="bash clang-extra-tools curl g++ make automake autoconf libtool git curl-dev fuse3 fuse3-devg i jq libxml2-dev openssl coreutils procps attr sed mailcap openjdk21 perl-test-harness-utils aws-cli"
+    INSTALL_PACKAGES="bash clang-extra-tools curl g++ make automake autoconf libtool git curl-dev fuse3 fuse3-dev i jq libxml2-dev openssl coreutils procps attr sed mailcap openjdk21 perl-test-harness-utils aws-cli"
 
     AWSCLI_DIRECT_INSTALL=0
 

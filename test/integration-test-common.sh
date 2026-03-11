@@ -84,14 +84,17 @@ fi
 export TEST_BUCKET_1
 export S3_URL
 export S3_ENDPOINT
+export S3PROXY_CACERT_FILE
 TEST_SCRIPT_DIR=$(pwd)
 export TEST_SCRIPT_DIR
 export TEST_BUCKET_MOUNT_POINT_1=${TEST_BUCKET_1}
 
-S3PROXY_VERSION="2.5.0"
+S3PROXY_VERSION="2.9.0"
+S3PROXY_HASH="30965ab24f6eed0ff7260d37a9f4e1efba38829e19b1302e5c080e3470d6a420"
 S3PROXY_BINARY="${S3PROXY_BINARY-"s3proxy-${S3PROXY_VERSION}"}"
 
 CHAOS_HTTP_PROXY_VERSION="1.1.0"
+CHAOS_HTTP_PROXY_HASH="9ad1b9ac6569e99b2db3e7edfdd78fae0ea5c83069beccdf6bceebc848add2e7"
 CHAOS_HTTP_PROXY_BINARY="chaos-http-proxy-${CHAOS_HTTP_PROXY_VERSION}"
 
 PJDFSTEST_HASH="c711b5f6b666579846afba399a998f74f60c488b"
@@ -113,6 +116,16 @@ fi
 
 if [ ! -d "${TEST_BUCKET_MOUNT_POINT_1}" ]; then
 	mkdir -p "${TEST_BUCKET_MOUNT_POINT_1}"
+fi
+
+# [NOTE]
+# For the Github Actions macos-14 Runner,
+# Set variables for when stdbuf is used and when it is not.
+#
+if [ -n "${STDBUF_BIN}" ]; then
+    STDBUF_COMMAND_LINE=("${STDBUF_BIN}" -oL -eL)
+else
+    STDBUF_COMMAND_LINE=()
 fi
 
 # This function execute the function parameters $1 times
@@ -158,7 +171,9 @@ function start_s3proxy {
     then
         if [ ! -e "${S3PROXY_BINARY}" ]; then
             curl "https://github.com/gaul/s3proxy/releases/download/s3proxy-${S3PROXY_VERSION}/s3proxy" \
-                --fail --location --silent --output "${S3PROXY_BINARY}"
+                --fail --location --silent --output "/tmp/${S3PROXY_BINARY}"
+            echo "$S3PROXY_HASH" "/tmp/${S3PROXY_BINARY}" | sha256sum --check
+            mv "/tmp/${S3PROXY_BINARY}" "${S3PROXY_BINARY}"
             chmod +x "${S3PROXY_BINARY}"
         fi
 
@@ -176,7 +191,7 @@ function start_s3proxy {
             S3PROXY_CACERT_FILE=""
         fi
 
-        "${STDBUF_BIN}" -oL -eL java -jar "${S3PROXY_BINARY}" --properties "${S3PROXY_CONFIG}" &
+        "${STDBUF_COMMAND_LINE[@]}" java -jar "${S3PROXY_BINARY}" --properties "${S3PROXY_CONFIG}" &
         S3PROXY_PID=$!
 
         # wait for S3Proxy to start
@@ -186,11 +201,13 @@ function start_s3proxy {
     if [ -n "${CHAOS_HTTP_PROXY}" ] || [ -n "${CHAOS_HTTP_PROXY_OPT}" ]; then
         if [ ! -e "${CHAOS_HTTP_PROXY_BINARY}" ]; then
             curl "https://github.com/bouncestorage/chaos-http-proxy/releases/download/chaos-http-proxy-${CHAOS_HTTP_PROXY_VERSION}/chaos-http-proxy" \
-                --fail --location --silent --output "${CHAOS_HTTP_PROXY_BINARY}"
+                --fail --location --silent --output "/tmp/${CHAOS_HTTP_PROXY_BINARY}"
+            echo "$CHAOS_HTTP_PROXY_HASH" "/tmp/${CHAOS_HTTP_PROXY_BINARY}" | sha256sum --check
+            mv "/tmp/${CHAOS_HTTP_PROXY_BINARY}" "${CHAOS_HTTP_PROXY_BINARY}"
             chmod +x "${CHAOS_HTTP_PROXY_BINARY}"
         fi
 
-        "${STDBUF_BIN}" -oL -eL java -jar "${CHAOS_HTTP_PROXY_BINARY}" --properties chaos-http-proxy.conf &
+        "${STDBUF_COMMAND_LINE[@]}" java -jar "${CHAOS_HTTP_PROXY_BINARY}" --properties chaos-http-proxy.conf &
         CHAOS_HTTP_PROXY_PID=$!
 
         # wait for Chaos HTTP Proxy to start
@@ -310,7 +327,7 @@ function start_s3fs {
     (
         set -x 
         CURL_CA_BUNDLE="${S3PROXY_CACERT_FILE}" \
-        ${STDBUF_BIN} -oL -eL \
+        "${STDBUF_COMMAND_LINE[@]}" \
             ${VALGRIND_EXEC} \
             ${S3FS} \
             ${TEST_BUCKET_1} \
@@ -328,12 +345,13 @@ function start_s3fs {
             -o stat_cache_expire=1 \
             -o stat_cache_interval_expire=1 \
             -o dbglevel="${DBGLEVEL:=info}" \
+            -o insecure_logging \
             -o no_time_stamp_msg \
             -o retries=3 \
             -f \
             "${@}" &
         echo $! >&3
-    ) 3>pid | "${STDBUF_BIN}" -oL -eL "${SED_BIN}" "${SED_BUFFER_FLAG}" "s/^/s3fs: /" &
+    ) 3>pid | "${STDBUF_COMMAND_LINE[@]}" awk "{print \"s3fs: \" \$0}" &
     sleep 1
     S3FS_PID=$(<pid)
     export S3FS_PID

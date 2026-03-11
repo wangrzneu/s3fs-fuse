@@ -21,15 +21,12 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
-#include <cstdlib>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include "common.h"
-#include "s3fs.h"
 #include "s3fs_logger.h"
 #include "s3fs_util.h"
 #include "fdcache_fdinfo.h"
@@ -121,7 +118,11 @@ bool PseudoFdInfo::OpenUploadFd()
         S3FS_PRN_ERR("Could not duplicate physical file descriptor(errno=%d)", errno);
         return false;
     }
-    scope_guard guard([&]() { close(fd); });
+    scope_guard guard([fd]() {
+        if(-1 == close(fd)){
+            S3FS_PRN_ERR("close() failed for fd %d - errno(%d)", fd, errno);
+        }
+    });
 
     if(0 != lseek(fd, 0, SEEK_SET)){
         S3FS_PRN_ERR("Could not seek physical file descriptor(errno=%d)", errno);
@@ -371,7 +372,7 @@ bool PseudoFdInfo::ParallelMultipartUpload(const char* path, const mp_part_list_
         // setup instruction and request on another thread
         int result;
         if(0 != (result = multipart_upload_part_request(strpath, tmp_upload_fd, iter->start, iter->size, iter->part_num, tmp_upload_id, petag, is_copy, &uploaded_sem, &upload_list_lock, &last_result))){
-            S3FS_PRN_ERR("failed setup instruction for Multipart Upload Part Request by erro(%d) [path=%s][start=%lld][size=%lld][part_num=%d][is_copy=%s]", result, strpath.c_str(), static_cast<long long int>(iter->start), static_cast<long long int>(iter->size), iter->part_num, (is_copy ? "true" : "false"));
+            S3FS_PRN_ERR("failed setup instruction for Multipart Upload Part Request by error(%d) [path=%s][start=%lld][size=%lld][part_num=%d][is_copy=%s]", result, strpath.c_str(), static_cast<long long int>(iter->start), static_cast<long long int>(iter->size), iter->part_num, (is_copy ? "true" : "false"));
             return false;
         }
 
@@ -488,7 +489,7 @@ ssize_t PseudoFdInfo::UploadBoundaryLastUntreatedArea(const char* path, headers_
     // Get the area for uploading, if last update treated area can be uploaded.
     //
     // [NOTE]
-    // * Create the updoad area list, if the untreated area aligned with the boundary
+    // * Create the upload area list, if the untreated area aligned with the boundary
     //   exceeds the maximum upload size.
     // * If it overlaps with an area that has already been uploaded(unloaded list),
     //   that area is added to the cancellation list and included in the untreated area.
@@ -593,7 +594,7 @@ bool PseudoFdInfo::CancelAllThreads()
 }
 
 //
-// Extract the list for multipart upload from the Unteated Area
+// Extract the list for multipart upload from the Untreated Area
 //
 // The untreated_start parameter must be set aligning it with the boundaries
 // of the maximum multipart upload size. This method expects it to be bounded.
@@ -735,7 +736,7 @@ bool PseudoFdInfo::ExtractUploadPartsFromAllArea(UntreatedParts& untreated_list,
         cur_size = ((cur_start + max_mp_size) <= file_size ? max_mp_size : (file_size - cur_start));
 
         //
-        // Extract the untreated erea that overlaps this current area.
+        // Extract the untreated area that overlaps this current area.
         // (The extracted area is deleted from dup_untreated_list.)
         //
         untreated_list_t cur_untreated_list;

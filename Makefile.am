@@ -38,13 +38,14 @@ clang-tidy:
 cppcheck:
 	cppcheck --quiet --error-exitcode=1 \
             --inline-suppr \
-            --std=c++14 \
+            --std=@CPP_VERSION@ \
             --xml \
             -D HAVE_ATTR_XATTR_H \
             -D HAVE_SYS_EXTATTR_H \
             -D HAVE_MALLOC_TRIM \
             -U CURLE_PEER_FAILED_VERIFICATION \
             -U ENOATTR \
+            -i test/pjd-pjdfstest* \
             --enable=warning,style,information,missingInclude \
             --suppress=missingIncludeSystem \
             --suppress=unmatchedSuppression \
@@ -68,20 +69,16 @@ SHELLCHECK_COMMON_IGN = --exclude=SC1091
 SHELLCHECK_CUSTOM_IGN = --exclude=SC1091
 
 shellcheck:
-	@if type shellcheck > /dev/null 2>&1; then \
-		echo "* ShellCheck version"; \
-		$(SHELLCHECK_CMD) --version; \
-		echo ""; \
-		echo "* Check all sh files with ShellCheck"; \
-		LC_ALL=C.UTF-8 $(SHELLCHECK_CMD) $(SHELLCHECK_SH_OPT) $(SHELLCHECK_COMMON_IGN) $$(grep '#![[:space:]]*/bin/sh' $$(find . -type f -name \*.sh) | sed -e 's|^\(.*\):#\!.*$$|\1|g') || exit 1; \
-		echo "-> No error was detected."; \
-		echo ""; \
-		echo "* Check all bash files with ShellCheck"; \
-		LC_ALL=C.UTF-8 $(SHELLCHECK_CMD) $(SHELLCHECK_BASH_OPT) $(SHELLCHECK_COMMON_IGN) $$(grep '#![[:space:]]*/bin/bash' $$(find . -type f -name \*.sh) | sed -e 's|^\(.*\):#\!.*$$|\1|g') || exit 1; \
-		echo "-> No error was detected."; \
-	else \
-		echo "* ShellCheck is not installed, so skip this."; \
-	fi
+	echo "* ShellCheck version"; \
+	$(SHELLCHECK_CMD) --version; \
+	echo ""; \
+	echo "* Check all sh files with ShellCheck"; \
+	LC_ALL=C.UTF-8 $(SHELLCHECK_CMD) $(SHELLCHECK_SH_OPT) $(SHELLCHECK_COMMON_IGN) $$(find . -type f -name \*.sh | grep -v pjd-pjdfstest | xargs grep -l '^#![[:space:]]*/bin/sh$$') || exit 1; \
+	echo "-> No error was detected."; \
+	echo ""; \
+	echo "* Check all bash files with ShellCheck"; \
+	LC_ALL=C.UTF-8 $(SHELLCHECK_CMD) $(SHELLCHECK_BASH_OPT) $(SHELLCHECK_COMMON_IGN) $$(find . -type f -name \*.sh | grep -v pjd-pjdfstest | xargs grep -l '^#![[:space:]]*/bin/bash$$') || exit 1; \
+	echo "-> No error was detected.";
 
 #
 # Local variables:

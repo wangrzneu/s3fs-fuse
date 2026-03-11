@@ -20,7 +20,6 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -34,7 +33,7 @@
 int main(int argc, const char *argv[])
 {
     if(argc != 2){
-        fprintf(stderr, "[ERROR] Wrong paraemters\n");
+        fprintf(stderr, "[ERROR] Wrong parameters\n");
         fprintf(stdout, "[Usage] cr_filename <base file path>\n");
         exit(EXIT_FAILURE);
     }

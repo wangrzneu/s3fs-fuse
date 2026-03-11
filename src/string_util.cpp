@@ -19,6 +19,7 @@
  */
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cerrno>
@@ -27,26 +28,32 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <regex>
+#include <fcntl.h>
+#include <sys/stat.h>  // NOLINT(misc-include-cleaner)
 
 #include "s3fs_logger.h"
 #include "string_util.h"
 
 //-------------------------------------------------------------------
-// Global variables
-//-------------------------------------------------------------------
-
-//-------------------------------------------------------------------
 // Functions
 //-------------------------------------------------------------------
-
 std::string str(const struct timespec& value)
 {
-    std::ostringstream s;
-    s << value.tv_sec;
-    if(value.tv_nsec != 0){
-        s << "." << std::setfill('0') << std::setw(9) << value.tv_nsec;
+    if(UTIME_OMIT == value.tv_nsec){
+        return "UTIME_OMIT";
+    }else if(UTIME_NOW == value.tv_nsec){
+        return "UTIME_NOW";
+    }else{
+        char buf[64];
+        size_t len;
+        if(value.tv_nsec == 0){
+            len = std::snprintf(buf, sizeof(buf), "%ld", value.tv_sec);
+        }else{
+            len = std::snprintf(buf, sizeof(buf), "%ld.%09ld", value.tv_sec, value.tv_nsec);
+        }
+        return std::string(buf, len);
     }
-    return s.str();
 }
 
 // This source code is from https://gist.github.com/jeremyfromearth/5694aa3a66714254752179ecf3c95582 .
@@ -155,8 +162,7 @@ static constexpr char encode_query_except_chars[]   = ".-_~=&%"; // For query pa
 static std::string rawUrlEncode(const std::string &s, const char* except_chars)
 {
     std::string result;
-    for (size_t i = 0; i < s.length(); ++i) {
-        unsigned char c = s[i];
+    for(unsigned char c : s){
         if((except_chars && nullptr != strchr(except_chars, c)) ||
            (c >= 'a' && c <= 'z') ||
            (c >= 'A' && c <= 'Z') ||
@@ -657,6 +663,87 @@ std::string get_decoded_cr_code(const char* pencode)
         result += strencode.substr(startpos);
     }
     return result;
+}
+
+//-------------------------------------------------------------------
+// Utilities for masking sensitive strings
+//-------------------------------------------------------------------
+const char* mask_sensitive_string_with_flag(const char* sensitive, bool nomask)
+{
+    if(!sensitive){
+        return "(null)";
+    }else if(nomask){
+        return sensitive;
+    }else{
+        return "[SENSITIVE]";
+    }
+}
+
+std::string mask_sensitive_header(const char* pheader, size_t length)
+{
+    static const char* SensitiveHeaders[] = {
+        "authorization:",                                   // do not change this position(see. isAuthHeader)
+        "x-amz-security-token:",
+        "x-amz-credential:",
+        "x-amz-signature:",
+        "x-amz-server-side-encryption-customer-key-md5:",
+        "x-amz-server-side-encryption-aws-kms-key-id:",
+        "x-amz-copy-source-server-side-encryption-customer-key:",
+        "x-amz-copy-source-server-side-encryption-customer-key-md5:",
+        nullptr
+    };
+
+    if(!pheader || length == 0){
+        return std::string();
+    }
+    std::string strHeader(pheader, length);
+
+    bool isAuthHeader = true;
+    for(const auto* one_sensitive: SensitiveHeaders){
+        if(one_sensitive == nullptr){
+            break;
+        }
+        if(0 == strncasecmp(strHeader.c_str(), one_sensitive, strlen(one_sensitive))){
+			if(isAuthHeader){
+				// mask the element in Authorization header
+                static const std::regex aws4_check(R"(\s*AWS4-HMAC-SHA256\s+)", std::regex::icase);
+                static const std::regex aws2_check(R"(\s*AWS\s+)", std::regex::icase);
+
+                if(std::regex_search(strHeader, aws4_check)){
+                    // AWS Signature Version 4
+                    strHeader = std::regex_replace(strHeader, std::regex(R"((Credential)\s*=\s*[^,]+)",    std::regex::icase), "$1=[SENSITIVE]");
+                    strHeader = std::regex_replace(strHeader, std::regex(R"((SignedHeaders)\s*=\s*[^,]+)", std::regex::icase), "$1=[SENSITIVE]");
+                    strHeader = std::regex_replace(strHeader, std::regex(R"((Signature)\s*=\s*\S+)",       std::regex::icase), "$1=[SENSITIVE]");
+                }else if(std::regex_search(strHeader, aws2_check)){
+                    // AWS Signature Version 2
+                    strHeader = std::regex_replace(strHeader, std::regex(R"((\s*AWS\s+)(.+))", std::regex::icase), "$1[SENSITIVE]");
+                }else{
+                    // wrong format
+                    strHeader.resize(strlen(one_sensitive));
+                    strHeader += " [SENSITIVE(wrong format)]";
+                }
+			}else{
+                strHeader.resize(strlen(one_sensitive));
+                strHeader += " [SENSITIVE]";
+			}
+            break;
+        }
+        isAuthHeader = false;
+    }
+    return strHeader;
+}
+
+std::string mask_sensitive_arg(const char* arg)
+{
+    if(!arg || 0 == strlen(arg)){
+        return std::string();
+    }
+
+    std::string strArg(arg);
+    strArg = std::regex_replace(strArg, std::regex(R"((url=https?://)[^@]+(@))", std::regex::icase), "$1[SENSITIVE]$2");
+    strArg = std::regex_replace(strArg, std::regex(R"((ssl_client_cert=(?:[^:]+:){4})(.+))", std::regex::icase), "$1[SENSITIVE]");
+
+    return strArg;
 }
 
 /*

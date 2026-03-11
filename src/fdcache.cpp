@@ -21,7 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cerrno>
-#include <climits>
+#include <climits>  // NOLINT(misc-include-cleaner)
 #include <unistd.h>
 #include <dirent.h>
 #include <mutex>
@@ -188,7 +188,7 @@ bool FdManager::MakeCachePath(const char* path, std::string& cache_path, bool is
 
     if(is_create_dir){
         int result;
-        if(0 != (result = mkdirp(resolved_path + mydirname(path), 0777))){
+        if(0 != (result = mkdirp(resolved_path + (path == nullptr ? "" : mydirname(path)), 0777))){
             S3FS_PRN_ERR("failed to create dir(%s) by errno(%d).", path, result);
             return false;
         }
@@ -333,7 +333,7 @@ bool FdManager::IsSafeDiskSpace(const char* path, off_t size, bool withmsg)
 
     if(fsize < needsize){
         if(withmsg){
-            S3FS_PRN_EXIT("There is no enough disk space for used as cache(or temporary) directory by s3fs. Requires %.3f MB, already has %.3f MB.", static_cast<double>(needsize) / 1024 / 1024, static_cast<double>(fsize) / 1024 / 1024);
+            S3FS_PRN_EXIT("There is not enough disk space for use as cache(or temporary) directory by s3fs. Requires %.3f MB, already has %.3f MB.", static_cast<double>(needsize) / 1024 / 1024, static_cast<double>(fsize) / 1024 / 1024);
         }
         return false;
     }
@@ -423,6 +423,7 @@ std::unique_ptr<FILE, decltype(&s3fs_fclose)> FdManager::MakeTempFile() {
     }
     if (-1 == unlink(cfn)) {
         S3FS_PRN_ERR("failed to delete tmp file. errno(%d)", errno);
+        close(fd);
         return {nullptr, &s3fs_fclose};
     }
     return {fdopen(fd, "rb+"), &s3fs_fclose};
@@ -464,7 +465,7 @@ FdManager::~FdManager()
 {
     if(this == FdManager::get()){
         for(auto iter = fent.cbegin(); fent.cend() != iter; ++iter){
-            FdEntity* ent = (*iter).second.get();
+            const FdEntity* ent = iter->second.get();
             S3FS_PRN_WARN("To exit with the cache file opened: path=%s, refcnt=%d", ent->GetPath().c_str(), ent->GetOpenCount());
         }
         fent.clear();
@@ -527,9 +528,9 @@ FdEntity* FdManager::GetFdEntityHasLock(const char* path, int& existfd, bool new
     return nullptr;
 }
 
-FdEntity* FdManager::Open(int& fd, const char* path, const headers_t* pmeta, off_t size, const struct timespec& ts_mctime, int flags, bool force_tmpfile, bool is_create, bool ignore_modify)
+FdEntity* FdManager::Open(int& fd, const char* path, const headers_t* pmeta, off_t size, const FileTimes& ts_times, int flags, bool force_tmpfile, bool is_create, bool ignore_modify)
 {
-    S3FS_PRN_DBG("[path=%s][size=%lld][ts_mctime=%s][flags=0x%x][force_tmpfile=%s][create=%s][ignore_modify=%s]", SAFESTRPTR(path), static_cast<long long>(size), str(ts_mctime).c_str(), flags, (force_tmpfile ? "yes" : "no"), (is_create ? "yes" : "no"), (ignore_modify ? "yes" : "no"));
+    S3FS_PRN_DBG("[path=%s][size=%lld][ctime=%s,atime=%s,mtime=%s][flags=0x%x][force_tmpfile=%s][create=%s][ignore_modify=%s]", SAFESTRPTR(path), static_cast<long long>(size), str(ts_times.ctime()).c_str(), str(ts_times.atime()).c_str(), str(ts_times.mtime()).c_str(), flags, (force_tmpfile ? "yes" : "no"), (is_create ? "yes" : "no"), (ignore_modify ? "yes" : "no"));
 
     if(!path || '\0' == path[0]){
         return nullptr;
@@ -573,7 +574,7 @@ FdEntity* FdManager::Open(int& fd, const char* path, const headers_t* pmeta, off
         }
 
         // (re)open
-        if(0 > (fd = ent->Open(pmeta, size, ts_mctime, flags))){
+        if(0 > (fd = ent->Open(pmeta, size, ts_times, flags))){
             S3FS_PRN_ERR("failed to (re)open and create new pseudo fd for path(%s).", path);
             return nullptr;
         }
@@ -590,7 +591,7 @@ FdEntity* FdManager::Open(int& fd, const char* path, const headers_t* pmeta, off
         auto ent = std::make_shared<FdEntity>(path, cache_path.c_str());
 
         // open
-        if(0 > (fd = ent->Open(pmeta, size, ts_mctime, flags))){
+        if(0 > (fd = ent->Open(pmeta, size, ts_times, flags))){
             S3FS_PRN_ERR("failed to open and create new pseudo fd for path(%s) errno:%d.", path, fd);
             return nullptr;
         }
@@ -656,7 +657,15 @@ FdEntity* FdManager::OpenExistFdEntity(const char* path, int& fd, int flags)
     S3FS_PRN_DBG("[path=%s][flags=0x%x]", SAFESTRPTR(path), flags);
 
     // search entity by path, and create pseudo fd
-    FdEntity* ent = Open(fd, path, nullptr, -1, S3FS_OMIT_TS, flags, false, false, false);
+    //
+    // [NOTE]
+    // The file timespec is set to UIMTE_OMIT.
+    // This means that if the file is already open(this method is called
+    // when expected to be open), the timespecs will not be updated.
+    // If the file is not open, the current time will be applied.
+    //
+    FdEntity* ent = Open(fd, path, nullptr, -1, FileTimes(), flags, false, false, false);
+
     if(!ent){
         // Not found entity
         return nullptr;
@@ -828,7 +837,10 @@ void FdManager::CleanupCacheDir()
         CleanupCacheDirInternal("");
         //S3FS_PRN_DBG("cache cleanup ended");
     }else{
-        // wait for other thread to finish cache cleanup
+        // [NOTE]
+        // Another thread is already executing CleanupCacheDirInternal().
+        // Wait for it to complete by blocking on the lock - no need to run
+        // cleanup again since it was just performed by the other thread.
         FdManager::cache_cleanup_lock.lock();
     }
     FdManager::cache_cleanup_lock.unlock();
@@ -836,14 +848,19 @@ void FdManager::CleanupCacheDir()
 
 void FdManager::CleanupCacheDirInternal(const std::string &path)
 {
-    DIR*           dp;
-    struct dirent* dent;
-    std::string    abs_path = cache_dir + "/" + S3fsCred::GetBucket() + path;
+    DIR*                 dp;
+    const struct dirent* dent;
+    std::string          abs_path = cache_dir + "/" + S3fsCred::GetBucket() + path;
 
     if(nullptr == (dp = opendir(abs_path.c_str()))){
         S3FS_PRN_ERR("could not open cache dir(%s) - errno(%d)", abs_path.c_str(), errno);
         return;
     }
+    scope_guard dir_guard([dp, abs_path]() {
+        if(-1 == closedir(dp)){
+            S3FS_PRN_ERR("closedir() failed for %s - errno(%d)", abs_path.c_str(), errno);
+        }
+    });
 
     for(dent = readdir(dp); dent; dent = readdir(dp)){
         if(0 == strcmp(dent->d_name, "..") || 0 == strcmp(dent->d_name, ".")){
@@ -855,7 +872,6 @@ void FdManager::CleanupCacheDirInternal(const std::string &path)
         struct stat st;
         if(0 != lstat(fullpath.c_str(), &st)){
             S3FS_PRN_ERR("could not get stats of file(%s) - errno(%d)", fullpath.c_str(), errno);
-            closedir(dp);
             return;
         }
         std::string next_path = path + "/" + dent->d_name;
@@ -876,7 +892,6 @@ void FdManager::CleanupCacheDirInternal(const std::string &path)
             FdManager::fd_manager_lock.unlock();
         }
     }
-    closedir(dp);
 }
 
 bool FdManager::ReserveDiskSpace(off_t size)
@@ -938,6 +953,11 @@ bool FdManager::RawCheckAllCache(FILE* fp, const char* cache_stat_top_dir, const
         S3FS_PRN_ERR("Could not open directory(%s) by errno(%d)", target_dir.c_str(), errno);
         return false;
     }
+    scope_guard dir_guard([statsdir, target_dir]() {
+        if(-1 == closedir(statsdir)){
+            S3FS_PRN_ERR("closedir() failed for %s - errno(%d)", target_dir.c_str(), errno);
+        }
+    });
 
     // loop in directory of cache file's stats
     const struct dirent* pdirent = nullptr;
@@ -995,7 +1015,11 @@ bool FdManager::RawCheckAllCache(FILE* fp, const char* cache_stat_top_dir, const
                 S3FS_PRN_CACHE(fp, CACHEDBG_FMT_CRIT_HEAD, "Could not open cache file");
                 continue;
             }
-            scope_guard guard([&]() { close(cache_file_fd); });
+            scope_guard guard([cache_file_fd, cache_path]() {
+                if(-1 == close(cache_file_fd)){
+                    S3FS_PRN_ERR("close() failed for %s - errno(%d)", cache_path.c_str(), errno);
+                }
+            });
 
             // get inode number for cache file
             struct stat st;
@@ -1059,7 +1083,6 @@ bool FdManager::RawCheckAllCache(FILE* fp, const char* cache_stat_top_dir, const
             warn_area_list.clear();
         }
     }
-    closedir(statsdir);
 
     return true;
 }

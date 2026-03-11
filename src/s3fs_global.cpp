@@ -30,12 +30,24 @@ bool nomultipart                  = false;
 bool pathrequeststyle             = false;
 bool complement_stat              = false;
 bool noxmlns                      = false;
+bool insecure_logging             = false;
 std::string program_name;
 std::string service_path          = "/";
 std::string s3host                = "https://s3.amazonaws.com";
 std::string region                = "us-east-1";
 std::string cipher_suites;
 std::string instance_name;
+
+std::atomic<long long unsigned> num_requests_head_object;
+std::atomic<long long unsigned> num_requests_put_object;
+std::atomic<long long unsigned> num_requests_get_object;
+std::atomic<long long unsigned> num_requests_delete_object;
+std::atomic<long long unsigned> num_requests_list_bucket;
+std::atomic<long long unsigned> num_requests_mpu_initiate;
+std::atomic<long long unsigned> num_requests_mpu_complete;
+std::atomic<long long unsigned> num_requests_mpu_abort;
+std::atomic<long long unsigned> num_requests_mpu_upload_part;
+std::atomic<long long unsigned> num_requests_mpu_copy_part;
 
 /*
 * Local variables:

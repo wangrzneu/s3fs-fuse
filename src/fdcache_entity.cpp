@@ -21,7 +21,6 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
-#include <climits>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -33,7 +32,6 @@
 #include <utime.h>
 
 #include "common.h"
-#include "s3fs.h"
 #include "fdcache_entity.h"
 #include "fdcache_fdinfo.h"
 #include "fdcache_stat.h"
@@ -121,8 +119,6 @@ FdEntity::FdEntity(const char* tpath, const char* cpath) :
     cachepath(SAFESTRPTR(cpath)), pending_status(pending_status_t::NO_UPDATE_PENDING),
     ro_path(SAFESTRPTR(tpath))
 {
-    holding_mtime.tv_sec = -1;
-    holding_mtime.tv_nsec = 0;
 }
 
 FdEntity::~FdEntity()
@@ -170,6 +166,8 @@ void FdEntity::Clear()
     // set backup(read only) variable
     const std::lock_guard<std::mutex> ro_lock(ro_path_lock);
     ro_path   = path;
+
+    timestamps.Clear();
 }
 
 // [NOTE]
@@ -382,21 +380,21 @@ bool FdEntity::IsUploading()
 // If the open is successful, returns pseudo fd.
 // If it fails, it returns an error code with a negative value.
 //
-// ts_mctime argument is a variable for mtime/ctime.
-// If you want to disable this variable, specify UTIME_OMIT for
-// tv_nsec in timespec member(in this case tv_sec member is ignored).
-// This is similar to utimens operation.
-// You can use "S3FS_OMIT_TS" global variable for UTIME_OMIT.
+// The ts_times argument is a variable for atime/mtime/ctime.
+// If you want to disable each value, set the tv_nsec of the timespec
+// member corresponding to atime/ctime/mtime to UTIME_OMIT. (In this
+// case, the tv_sec member will be ignored.)
+// This is the same as the behavior of utimens.
 //
-int FdEntity::Open(const headers_t* pmeta, off_t size, const struct timespec& ts_mctime, int flags)
+int FdEntity::Open(const headers_t* pmeta, off_t size, const FileTimes& ts_times, int flags)
 {
     const std::lock_guard<std::mutex> lock(fdent_lock);
     const std::lock_guard<std::mutex> data_lock(fdent_data_lock);
 
-    S3FS_PRN_DBG("[path=%s][physical_fd=%d][size=%lld][ts_mctime=%s][flags=0x%x]", path.c_str(), physical_fd, static_cast<long long>(size), str(ts_mctime).c_str(), flags);
+    S3FS_PRN_DBG("[path=%s][physical_fd=%d][size=%lld][ctime=%s,atime=%s,mtime=%s][flags=0x%x]", path.c_str(), physical_fd, static_cast<long long>(size), str(ts_times.ctime()).c_str(), str(ts_times.atime()).c_str(), str(ts_times.mtime()).c_str(), flags);
 
     // [NOTE]
-    // When the file size is incremental by truncating, it must be keeped
+    // When the file size is incremental by truncating, it must be kept
     // as an untreated area, and this area is set to these variables.
     //
     off_t truncated_start = 0;
@@ -442,6 +440,7 @@ int FdEntity::Open(const headers_t* pmeta, off_t size, const struct timespec& ts
         //
         bool  need_save_csf = false;  // need to save(reset) cache stat file
         bool  is_truncate   = false;  // need to truncate
+        int   result        = 0;
 
         std::unique_ptr<CacheFileStat> pcfstat;
 
@@ -449,7 +448,8 @@ int FdEntity::Open(const headers_t* pmeta, off_t size, const struct timespec& ts
             // using cache
             struct stat st;
             if(stat(cachepath.c_str(), &st) == 0){
-                if(0 > compare_timespec(st, stat_time_type::MTIME, ts_mctime)){
+                // check if the cache file stale
+                if(!ts_times.IsOmitMTime() && 0 > compare_timespec(st, stat_time_type::MTIME, ts_times.mtime())){
                     S3FS_PRN_DBG("cache file stale, removing: %s", cachepath.c_str());
                     if(unlink(cachepath.c_str()) != 0){
                         return (0 == errno ? -EIO : -errno);
@@ -469,9 +469,11 @@ int FdEntity::Open(const headers_t* pmeta, off_t size, const struct timespec& ts
                 st = {};
                 if(-1 == fstat(physical_fd, &st)){
                     S3FS_PRN_ERR("fstat is failed. errno(%d)", errno);
+                    const int save_errno = errno;
+                    close(physical_fd);
                     physical_fd = -1;
                     inode       = 0;
-                    return (0 == errno ? -EIO : -errno);
+                    return (0 == save_errno ? -EIO : -save_errno);
                 }
                 // check size, st_size, loading stat file
                 if(-1 == size){
@@ -506,7 +508,6 @@ int FdEntity::Open(const headers_t* pmeta, off_t size, const struct timespec& ts
                     S3FS_PRN_ERR("failed to open file(%s). errno(%d)", cachepath.c_str(), errno);
 
                     // remove cache stat file if it is existed
-                    int result;
                     if(0 != (result = CacheFileStat::DeleteCacheFileStat(path.c_str()))){
                         if(-ENOENT != result){
                             S3FS_PRN_WARN("failed to delete current cache stat file(%s) by errno(%d), but continue...", path.c_str(), result);
@@ -522,14 +523,13 @@ int FdEntity::Open(const headers_t* pmeta, off_t size, const struct timespec& ts
                 }else{
                     // [NOTE]
                     // The modify flag must not be set when opening a file,
-                    // if the ts_mctime parameter(mtime) is specified(tv_nsec != UTIME_OMIT)
+                    // if the ts_times parameter(mtime) is specified(tv_nsec != UTIME_OMIT)
                     // and the cache file does not exist.
                     // If mtime is specified for the file and the cache file
                     // mtime is older than it, the cache file is removed and
                     // the processing comes here.
                     //
-                    pagelist.Resize(size, false, (UTIME_OMIT == ts_mctime.tv_nsec ? true : false));
-
+                    pagelist.Resize(size, false, ts_times.IsOmitMTime());
                     is_truncate = true;
                 }
             }
@@ -538,6 +538,8 @@ int FdEntity::Open(const headers_t* pmeta, off_t size, const struct timespec& ts
             int mirrorfd;
             if(0 >= (mirrorfd = OpenMirrorFile())){
                 S3FS_PRN_ERR("failed to open mirror file linked cache file(%s).", cachepath.c_str());
+                close(physical_fd);
+                physical_fd = -1;
                 return (0 == mirrorfd ? -EIO : mirrorfd);
             }
             // switch fd
@@ -572,14 +574,13 @@ int FdEntity::Open(const headers_t* pmeta, off_t size, const struct timespec& ts
             }else{
                 // [NOTE]
                 // The modify flag must not be set when opening a file,
-                // if the ts_mctime parameter(mtime) is specified(tv_nsec != UTIME_OMIT)
+                // if the ts_times parameter(mtime) is specified(tv_nsec != UTIME_OMIT)
                 // and the cache file does not exist.
                 // If mtime is specified for the file and the cache file
                 // mtime is older than it, the cache file is removed and
                 // the processing comes here.
                 //
-                pagelist.Resize(size, false, (UTIME_OMIT == ts_mctime.tv_nsec ? true : false));
-
+                pagelist.Resize(size, false, ts_times.IsOmitMTime());
                 is_truncate = true;
             }
         }
@@ -617,15 +618,13 @@ int FdEntity::Open(const headers_t* pmeta, off_t size, const struct timespec& ts
             truncated_size  = size - size_orgmeta;
         }
 
-        // set mtime and ctime(set "x-amz-meta-mtime" and "x-amz-meta-ctime" in orgmeta)
-        if(UTIME_OMIT != ts_mctime.tv_nsec){
-            if(0 != SetMCtimeHasLock(ts_mctime, ts_mctime)){
-                S3FS_PRN_ERR("failed to set mtime/ctime. errno(%d)", errno);
-                pfile.reset();
-                physical_fd = -1;
-                inode       = 0;
-                return (0 == errno ? -EIO : -errno);
-            }
+        // set file timespecs(to internal varibales,  cache file and original header)
+        if(0 != (result = SetFileTimesHasLock(ts_times))){
+            S3FS_PRN_ERR("failed to set file timespecs by result(%d)", result);
+            pfile.reset();
+            physical_fd = -1;
+            inode       = 0;
+            return result;
         }
     }
 
@@ -647,7 +646,7 @@ int FdEntity::Open(const headers_t* pmeta, off_t size, const struct timespec& ts
 
 // [NOTE]
 // This method is called for only nocopyapi functions.
-// So we do not check disk space for this option mode, if there is no enough
+// So we do not check disk space for this option mode, if there is not enough
 // disk space this method will be failed.
 //
 bool FdEntity::LoadAll(int fd, off_t* size, bool force_load)
@@ -757,6 +756,10 @@ bool FdEntity::GetStatsHasLock(struct stat& st) const
         S3FS_PRN_ERR("fstat failed. errno(%d)", errno);
         return false;
     }
+
+    const std::lock_guard<std::mutex> data_lock(fdent_data_lock);
+    timestamps.ReflectFileTimes(st);
+
     return true;
 }
 
@@ -764,9 +767,10 @@ int FdEntity::SetCtimeHasLock(struct timespec time)
 {
     S3FS_PRN_INFO3("[path=%s][physical_fd=%d][time=%s]", path.c_str(), physical_fd, str(time).c_str());
 
-    if(-1 == time.tv_sec){
+    if(!valid_timespec(time)){
         return 0;
     }
+    timestamps.SetCTime(time);
     orgmeta["x-amz-meta-ctime"] = str(time);
     return 0;
 }
@@ -775,174 +779,82 @@ int FdEntity::SetAtimeHasLock(struct timespec time)
 {
     S3FS_PRN_INFO3("[path=%s][physical_fd=%d][time=%s]", path.c_str(), physical_fd, str(time).c_str());
 
-    if(-1 == time.tv_sec){
+    if(!valid_timespec(time)){
         return 0;
     }
+    timestamps.SetATime(time);
     orgmeta["x-amz-meta-atime"] = str(time);
     return 0;
 }
 
-// [NOTE]
-// This method updates mtime as well as ctime.
-//
-int FdEntity::SetMCtimeHasLock(struct timespec mtime, struct timespec ctime)
+int FdEntity::SetMtimeHasLock(struct timespec time)
 {
-    S3FS_PRN_INFO3("[path=%s][physical_fd=%d][mtime=%s][ctime=%s]", path.c_str(), physical_fd, str(mtime).c_str(), str(ctime).c_str());
+    S3FS_PRN_INFO3("[path=%s][physical_fd=%d][time=%s]", path.c_str(), physical_fd, str(time).c_str());
 
-    if(mtime.tv_sec < 0 || ctime.tv_sec < 0){
+    if(!valid_timespec(time)){
         return 0;
     }
-
-    if(-1 != physical_fd){
-        struct timespec ts[2];
-        ts[0].tv_sec  = mtime.tv_sec;
-        ts[0].tv_nsec = mtime.tv_nsec;
-        ts[1].tv_sec  = ctime.tv_sec;
-        ts[1].tv_nsec = ctime.tv_nsec;
-        if(-1 == futimens(physical_fd, ts)){
-            S3FS_PRN_ERR("futimens failed. errno(%d)", errno);
-            return -errno;
-        }
-    }else if(!cachepath.empty()){
-        // not opened file yet.
-        struct timespec ts[2];
-        ts[0].tv_sec  = ctime.tv_sec;
-        ts[0].tv_nsec = ctime.tv_nsec;
-        ts[1].tv_sec  = mtime.tv_sec;
-        ts[1].tv_nsec = mtime.tv_nsec;
-        if(-1 == utimensat(AT_FDCWD, cachepath.c_str(), ts, 0)){
-            S3FS_PRN_ERR("utimensat failed. errno(%d)", errno);
-            return -errno;
-        }
-    }
-
-    orgmeta["x-amz-meta-mtime"] = str(mtime);
-    orgmeta["x-amz-meta-ctime"] = str(ctime);
-
+    timestamps.SetMTime(time);
+    orgmeta["x-amz-meta-mtime"] = str(time);
     return 0;
 }
 
-bool FdEntity::UpdateCtime()
+// [NOTE]
+// This method updates timespecs(atime/mtime) and original meta heders
+//
+int FdEntity::SetFileTimesHasLock(const FileTimes& ts_times)
 {
-    const std::lock_guard<std::mutex> lock(fdent_lock);
-    struct stat st;
-    if(!GetStatsHasLock(st)){
-        return false;
-    }
+    S3FS_PRN_INFO3("[path=%s][physical_fd=%d][ctime=%s,atime=%s,mtime=%s]", path.c_str(), physical_fd, str(ts_times.ctime()).c_str(), str(ts_times.atime()).c_str(), str(ts_times.mtime()).c_str());
 
-    orgmeta["x-amz-meta-ctime"] = str_stat_time(st, stat_time_type::CTIME);
+    // Set all timespecs without OMIT type
+    timestamps.SetAll(ts_times);
 
-    return true;
-}
+    // Set timespecs(mtime/atime) to cache file
+    if(!timestamps.IsOmitATime() || !timestamps.IsOmitMTime()){
+        struct timespec ts[2];
+        ts[0] = timestamps.atime();
+        ts[1] = timestamps.mtime();
 
-bool FdEntity::UpdateAtime()
-{
-    const std::lock_guard<std::mutex> lock(fdent_lock);
-    struct stat st;
-    if(!GetStatsHasLock(st)){
-        return false;
-    }
-
-    orgmeta["x-amz-meta-atime"] = str_stat_time(st, stat_time_type::ATIME);
-
-    return true;
-}
-
-bool FdEntity::UpdateMtime(bool clear_holding_mtime)
-{
-    const std::lock_guard<std::mutex> lock(fdent_lock);
-    const std::lock_guard<std::mutex> data_lock(fdent_data_lock);
-
-    if(0 <= holding_mtime.tv_sec){
-        // [NOTE]
-        // This conditional statement is very special.
-        // If you copy a file with "cp -p" etc., utimens or chown will be
-        // called after opening the file, after that call to write, flush.
-        // If normally utimens are not called(cases like "cp" only), mtime
-        // should be updated at the file flush.
-        // Here, check the holding_mtime value to prevent mtime from being
-        // overwritten.
-        //
-        if(clear_holding_mtime){
-            if(!ClearHoldingMtime()){
-                return false;
+        if(-1 != physical_fd){
+            if(-1 == futimens(physical_fd, ts)){
+                S3FS_PRN_ERR("futimens failed. errno(%d)", errno);
+                return -errno;
             }
-            // [NOTE]
-            // If come here after fdatasync has been processed, the file
-            // content update has already taken place. However, the metadata
-            // update is necessary and needs to be flagged in order to
-            // perform it with flush,
-            //
-            pending_status = pending_status_t::UPDATE_META_PENDING;
+        }else{
+            if(-1 == utimensat(AT_FDCWD, cachepath.c_str(), ts, 0)){
+                S3FS_PRN_ERR("utimensat failed. errno(%d)", errno);
+                return -errno;
+            }
         }
+    }
+
+    // Set original meta headers / Set time to stat from original meta
+    if(!timestamps.IsOmitATime()){
+        orgmeta["x-amz-meta-atime"] = str(timestamps.atime());
     }else{
-        struct stat st;
-        if(!GetStatsHasLock(st)){
-            return false;
-        }
-        orgmeta["x-amz-meta-mtime"] = str_stat_time(st, stat_time_type::MTIME);
-    }
-    return true;
-}
-
-bool FdEntity::SetHoldingMtime(struct timespec mtime)
-{
-    const std::lock_guard<std::mutex> lock(fdent_lock);
-    const std::lock_guard<std::mutex> data_lock(fdent_data_lock);
-
-    S3FS_PRN_INFO3("[path=%s][physical_fd=%d][mtime=%s]", path.c_str(), physical_fd, str(mtime).c_str());
-
-    if(mtime.tv_sec < 0){
-        return false;
-    }
-    holding_mtime = mtime;
-    return true;
-}
-
-bool FdEntity::ClearHoldingMtime()
-{
-    if(holding_mtime.tv_sec < 0){
-        return false;
-    }
-    struct stat st;
-    if(!GetStatsHasLock(st)){
-        return false;
-    }
-    if(-1 != physical_fd){
-        struct timespec ts[2];
-        struct timespec ts_ctime;
-
-        ts[0].tv_sec  = holding_mtime.tv_sec;
-        ts[0].tv_nsec = holding_mtime.tv_nsec;
-
-        set_stat_to_timespec(st, stat_time_type::CTIME, ts_ctime);
-        ts[1].tv_sec  = ts_ctime.tv_sec;
-        ts[1].tv_nsec = ts_ctime.tv_nsec;
-
-        if(-1 == futimens(physical_fd, ts)){
-            S3FS_PRN_ERR("futimens failed. errno(%d)", errno);
-            return false;
-        }
-    }else if(!cachepath.empty()){
-        // not opened file yet.
-        struct timespec ts[2];
-        struct timespec ts_ctime;
-
-        set_stat_to_timespec(st, stat_time_type::CTIME, ts_ctime);
-        ts[0].tv_sec  = ts_ctime.tv_sec;
-        ts[0].tv_nsec = ts_ctime.tv_nsec;
-
-        ts[1].tv_sec  = holding_mtime.tv_sec;
-        ts[1].tv_nsec = holding_mtime.tv_nsec;
-        if(-1 == utimensat(AT_FDCWD, cachepath.c_str(), ts, 0)){
-            S3FS_PRN_ERR("utimensat failed. errno(%d)", errno);
-            return false;
+        struct timespec meta_atime = get_atime(orgmeta, false);
+        if(0 != meta_atime.tv_sec && UTIME_OMIT != meta_atime.tv_nsec){
+            timestamps.SetATime(meta_atime);
         }
     }
-    holding_mtime.tv_sec = -1;
-    holding_mtime.tv_nsec = 0;
+    if(!timestamps.IsOmitMTime()){
+        orgmeta["x-amz-meta-mtime"] = str(timestamps.mtime());
+    }else{
+        struct timespec meta_mtime = get_mtime(orgmeta, false);
+        if(0 != meta_mtime.tv_sec && UTIME_OMIT != meta_mtime.tv_nsec){
+            timestamps.SetMTime(meta_mtime);
+        }
+    }
+    if(!timestamps.IsOmitCTime()){
+        orgmeta["x-amz-meta-ctime"] = str(timestamps.ctime());
+    }else{
+        struct timespec meta_ctime = get_ctime(orgmeta, false);
+        if(0 != meta_ctime.tv_sec && UTIME_OMIT != meta_ctime.tv_nsec){
+            timestamps.SetCTime(meta_ctime);
+        }
+    }
 
-    return true;
+    return 0;
 }
 
 bool FdEntity::GetSize(off_t& size) const
@@ -1001,6 +913,24 @@ bool FdEntity::SetContentType(const char* path)
     }
     const std::lock_guard<std::mutex> lock(fdent_lock);
     orgmeta["Content-Type"] = S3fsCurl::LookupMimeType(path);
+    return true;
+}
+
+//
+// Converts the internal meta header into a stat structure and returns it.
+//
+bool FdEntity::GetStatsFromMeta(struct stat& st) const
+{
+    const std::lock_guard<std::mutex> lock(fdent_lock);
+    if(!convert_header_to_stat(path, orgmeta, st, false)){
+        return false;
+    }
+
+    const std::lock_guard<std::mutex> data_lock(fdent_data_lock);
+    st.st_size = pagelist.Size();      // set current file size
+
+    timestamps.ReflectFileTimes(st);
+
     return true;
 }
 
@@ -1421,6 +1351,24 @@ int FdEntity::RowFlushHasLock(int fd, const char* tpath, bool force_sync)
         FdManager::DeleteCacheFile(tpath);
     }
 
+    // [NOTE]
+    // Normally, when client finishes editing a file and gets the file attributes,
+    // FUSE calls flush->release, and then getsattr.
+    // In other words, we expect that getattr will not be called between flush->release.
+    // However, because FUSE does not wait for the release process to be complete,
+    // the case of flush->getattr->release occurs.
+    // Therefore, we make sure to serialize the pagelist here.
+    //
+    if(0 == result && !cachepath.empty()){
+        ino_t cur_inode = GetInode();
+        if(0 != cur_inode && cur_inode == inode){
+            CacheFileStat cfstat(path.c_str());
+            if(!pagelist.Serialize(cfstat, inode)){
+                S3FS_PRN_WARN("failed to save cache stat file(%s).", path.c_str());
+            }
+        }
+    }
+
     return result;
 }
 
@@ -1445,7 +1393,7 @@ int FdEntity::RowFlushNoMultipart(const PseudoFdInfo* pseudo_obj, const char* tp
     if(0 < restsize){
         // check disk space
         if(!ReserveDiskSpace(restsize)){
-            // no enough disk space
+            // not enough disk space
             S3FS_PRN_WARN("Not enough local storage to flush: [path=%s][pseudo_fd=%d][physical_fd=%d]", (tpath ? tpath : path.c_str()), pseudo_obj->GetPseudoFd(), physical_fd);
             return -ENOSPC;   // No space left on device
         }
@@ -1528,7 +1476,7 @@ int FdEntity::RowFlushMultipart(PseudoFdInfo* pseudo_obj, const char* tpath)
 
         // Check rest size and free disk space
         if(0 < restsize && !ReserveDiskSpace(restsize)){
-           // no enough disk space
+           // not enough disk space
            if(0 != (result = NoCachePreMultipartUploadRequest(pseudo_obj))){
                S3FS_PRN_ERR("failed to switch multipart uploading with no cache(errno=%d)", result);
                return result;
@@ -1656,7 +1604,7 @@ int FdEntity::RowFlushMixMultipart(PseudoFdInfo* pseudo_obj, const char* tpath)
 
         // Check rest size and free disk space
         if(0 < restsize && !ReserveDiskSpace(restsize)){
-           // no enough disk space
+           // not enough disk space
            if(0 != (result = NoCachePreMultipartUploadRequest(pseudo_obj))){
                S3FS_PRN_ERR("failed to switch multipart uploading with no cache(errno=%d)", result);
                return result;
@@ -1870,7 +1818,7 @@ int FdEntity::RowFlushStreamMultipart(PseudoFdInfo* pseudo_obj, const char* tpat
             // Check if there is enough free disk space for the total download size
             //
             if(!ReserveDiskSpace(total_download_size)){
-                // no enough disk space
+                // not enough disk space
                 //
                 // [NOTE]
                 // Because there is no left space size to download, we can't solve this anymore
@@ -2161,7 +2109,7 @@ ssize_t FdEntity::WriteNoMultipart(const PseudoFdInfo* pseudo_obj, const char* b
     // check disk space
     off_t restsize = pagelist.GetTotalUnloadedPageSize(0, start) + size;
     if(!ReserveDiskSpace(restsize)){
-        // no enough disk space
+        // not enough disk space
         S3FS_PRN_WARN("Not enough local storage to cache write request: [path=%s][physical_fd=%d][offset=%lld][size=%zu]", path.c_str(), physical_fd, static_cast<long long int>(start), size);
         return -ENOSPC;   // No space left on device
     }
@@ -2228,7 +2176,7 @@ ssize_t FdEntity::WriteMultipart(PseudoFdInfo* pseudo_obj, const char* bytes, of
                 return result;
             }
         }else{
-            // no enough disk space
+            // not enough disk space
             if((start + static_cast<off_t>(size)) <= S3fsCurl::GetMultipartSize()){
                 S3FS_PRN_WARN("Not enough local storage to cache write request till multipart upload can start: [path=%s][physical_fd=%d][offset=%lld][size=%zu]", path.c_str(), physical_fd, static_cast<long long int>(start), size);
                 return -ENOSPC;   // No space left on device
@@ -2312,7 +2260,7 @@ ssize_t FdEntity::WriteMixMultipart(PseudoFdInfo* pseudo_obj, const char* bytes,
             // enough disk space
             FdManager::FreeReservedDiskSpace(restsize);
         }else{
-            // no enough disk space
+            // not enough disk space
             if((start + static_cast<off_t>(size)) <= S3fsCurl::GetMultipartSize()){
                 S3FS_PRN_WARN("Not enough local storage to cache write request till multipart upload can start: [path=%s][physical_fd=%d][offset=%lld][size=%zu]", path.c_str(), physical_fd, static_cast<long long int>(start), size);
                 return -ENOSPC;   // No space left on device
@@ -2427,6 +2375,7 @@ bool FdEntity::MergeOrgMeta(headers_t& updatemeta)
     const std::lock_guard<std::mutex> data_lock(fdent_data_lock);
 
     merge_headers(orgmeta, updatemeta, true);      // overwrite all keys
+
     // [NOTE]
     // this is special cases, we remove the key which has empty values.
     for(auto hiter = orgmeta.cbegin(); hiter != orgmeta.cend(); ){
@@ -2443,18 +2392,23 @@ bool FdEntity::MergeOrgMeta(headers_t& updatemeta)
     struct timespec mtime = get_mtime(updatemeta, false);      // not overcheck
     struct timespec ctime = get_ctime(updatemeta, false);      // not overcheck
     struct timespec atime = get_atime(updatemeta, false);      // not overcheck
-    if(0 <= mtime.tv_sec){
-        SetMCtimeHasLock(mtime, (ctime.tv_sec < 0 ? mtime : ctime));
-    }
-    if(0 <= atime.tv_sec){
-        SetAtimeHasLock(atime);
-    }
+
+    timestamps.SetAll(ctime, atime, mtime);                    // set all timespecs to internal data
 
     if(pending_status_t::NO_UPDATE_PENDING == pending_status && (IsUploading() || pagelist.IsModified())){
         pending_status = pending_status_t::UPDATE_META_PENDING;
     }
 
     return (pending_status_t::NO_UPDATE_PENDING != pending_status);
+}
+
+bool FdEntity::GetOrgMeta(headers_t& meta) const
+{
+    const std::lock_guard<std::mutex> lock(fdent_lock);
+    const std::lock_guard<std::mutex> data_lock(fdent_data_lock);
+
+    meta = orgmeta;
+    return true;
 }
 
 int FdEntity::UploadPendingHasLock(int fd)

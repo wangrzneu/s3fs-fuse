@@ -23,20 +23,14 @@
 
 #include <map>
 #include <string>
-#include <strings.h>
 #include <sys/stat.h>
+
+#include "types.h"
 
 //-------------------------------------------------------------------
 // headers_t
 //-------------------------------------------------------------------
-struct header_nocase_cmp
-{
-    bool operator()(const std::string &strleft, const std::string &strright) const
-    {
-        return (strcasecmp(strleft.c_str(), strright.c_str()) < 0);
-    }
-};
-typedef std::map<std::string, std::string, header_nocase_cmp> headers_t;
+typedef std::map<std::string, std::string, case_insensitive_compare_func> headers_t;
 
 //-------------------------------------------------------------------
 // Functions
@@ -48,6 +42,10 @@ off_t get_size(const char *s);
 off_t get_size(const headers_t& meta);
 mode_t get_mode(const char *s, int base = 0);
 mode_t get_mode(const headers_t& meta, const std::string& strpath, bool checkdir = false, bool forcedir = false);
+bool is_reg_fmt(const headers_t& meta);
+bool is_symlink_fmt(const headers_t& meta);
+bool is_dir_fmt(const headers_t& meta);
+objtype_t derive_object_type(const std::string& strpath, const headers_t& meta, objtype_t default_type = objtype_t::UNKNOWN);
 uid_t get_uid(const char *s);
 uid_t get_uid(const headers_t& meta);
 gid_t get_gid(const char *s);
@@ -58,7 +56,7 @@ time_t get_lastmodified(const char* s);
 time_t get_lastmodified(const headers_t& meta);
 bool is_need_check_obj_detail(const headers_t& meta);
 bool merge_headers(headers_t& base, const headers_t& additional, bool add_noexist);
-bool convert_header_to_stat(const char* path, const headers_t& meta, struct stat* pst, bool forcedir = false);
+bool convert_header_to_stat(const std::string& strpath, const headers_t& meta, struct stat& stbuf, bool forcedir = false);
 
 #endif // S3FS_METAHEADER_H_
 

@@ -28,11 +28,8 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
-#include <vector>
 
 #include "common.h"
-#include "fdcache_page.h"
 #include "metaheader.h"
 #include "s3fs_util.h"
 #include "types.h"
@@ -178,7 +175,7 @@ class S3fsCurl
         off_t                postdata_remaining;   // use by post method and read callback function.
         filepart             partdata;             // use by multipart upload/get object callback
         bool                 is_use_ahbe;          // additional header by extension
-        int                  retry_count;          // retry count, this is used only sleep time before retring
+        int                  retry_count;          // retry count, this is used only sleep time before retrying
         std::unique_ptr<FILE, decltype(&s3fs_fclose)> b_infile = {nullptr, &s3fs_fclose};  // backup for retrying
         const unsigned char* b_postdata;           // backup for retrying
         off_t                b_postdata_remaining; // backup for retrying
@@ -266,6 +263,7 @@ class S3fsCurl
         // class methods(variables)
         static std::string LookupMimeType(const std::string& name);
         static bool SetCheckCertificate(bool isCertCheck);
+        static bool IsCertCheck() { return S3fsCurl::is_cert_check; }
         static long SetConnectTimeout(long timeout);
         static time_t SetReadwriteTimeout(time_t timeout);
         static time_t GetReadwriteTimeout() { return S3fsCurl::readwrite_timeout; }
@@ -328,6 +326,7 @@ class S3fsCurl
         bool GetIAMCredentials(const char* cred_url, const char* iam_v2_token, const char* ibm_secret_access_key, std::string& response);
         bool GetIAMRoleFromMetaData(const char* cred_url, const char* iam_v2_token, std::string& token);
         bool GetResponseCode(long& responseCode, bool from_curl_handle = true) const;
+        bool GetCurlErrorString(std::string& strError) const;
         int RequestPerform(bool dontAddAuthHeaders=false);
         int DeleteRequest(const char* tpath);
         int GetIAMv2ApiToken(const char* token_url, int token_ttl, const char* token_ttl_hdr, std::string& response);

@@ -58,15 +58,23 @@ export LC_ALL=en_US.UTF-8
 # Set your PATH appropriately so that you can find these commands.
 #
 if [ "$(uname)" = "Darwin" ]; then
-    export STDBUF_BIN="gstdbuf"
+    # [NOTE][TODO]
+    # In macos-14(and maybe later), currently coreutils' gstdbuf doesn't
+    # work with the Github Actions Runner.
+    # This is because libstdbuf.so is arm64, when arm64e is required.
+    # To resolve this case, we'll avoid making calls to stdbuf. This can
+    # result in mixed log output, but there is currently no workaround.
+    #
+    if lipo -archs /opt/homebrew/Cellar/coreutils/9.8/libexec/coreutils/libstdbuf.so 2>/dev/null | grep -q 'arm64e'; then
+        export STDBUF_BIN="gstdbuf"
+    else
+        export STDBUF_BIN=""
+    fi
     export TRUNCATE_BIN="gtruncate"
-    export SED_BIN="gsed"
 else
     export STDBUF_BIN="stdbuf"
     export TRUNCATE_BIN="truncate"
-    export SED_BIN="sed"
 fi
-export SED_BUFFER_FLAG="--unbuffered"
 
 # [NOTE]
 # Specifying cache disable option depending on stat(coreutils) version
@@ -258,7 +266,7 @@ function describe {
 # Runs each test in a suite and summarizes results.  The list of
 # tests added by add_tests() is called with CWD set to a tmp
 # directory in the bucket.  An attempt to clean this directory is
-# made after the test run.  
+# made after the test run.
 function run_suite {
    orig_dir="${PWD}"
    key_prefix="testrun-${RANDOM}"
@@ -267,14 +275,21 @@ function run_suite {
        return 1
    fi
 
+   RANDOM_NUM=0
+
    for t in "${TEST_LIST[@]}"; do
+       # Make random string
+       RANDOM_NUM=$((RANDOM_NUM + 1))
+       RANDOM_STR=$(printf '%03d' "${RANDOM_NUM}")
+
        # Ensure test input name differs every iteration
-       TEST_TEXT_FILE="test-s3fs-${RANDOM}.txt"
-       TEST_DIR="testdir-${RANDOM}"
+       TEST_TEXT_FILE="test-s3fs-${RANDOM_STR}.txt"
+       TEST_DIR="testdir-${RANDOM_STR}"
        # shellcheck disable=SC2034
-       ALT_TEST_TEXT_FILE="test-s3fs-ALT-${RANDOM}.txt"
+       ALT_TEST_TEXT_FILE="test-s3fs-ALT-${RANDOM_STR}.txt"
        # shellcheck disable=SC2034
-       BIG_FILE="big-file-s3fs-${RANDOM}.txt"
+       BIG_FILE="big-file-s3fs-${RANDOM_STR}.txt"
+
        # The following sequence runs tests in a subshell to allow continuation
        # on test failure, but still allowing errexit to be in effect during
        # the test.
@@ -318,10 +333,26 @@ function run_suite {
    fi
 }
 
+# [TODO]
+# Temporary Solution for Ubuntu 25.10 Only
+# 
+# As of October 2025, the stat command in uutils coreutils (Rust) in Ubuntu 25.10
+# truncates the decimal point when retrieving atime/ctime individually.
+# We will take special measures to avoid this.
+# We will revert this once this issue is fixed.
+#
+TIME_FROM_FULL_STAT=$([ -f /etc/os-release ] && awk '/^ID=ubuntu/{os=1} /^VERSION_ID="25.10"/{version=1} END{print (os && version)}' /etc/os-release || echo 0)
+
 function get_ctime() {
     # ex: "1657504903.019784214"
     if [ "$(uname)" = "Darwin" ]; then
         "${STAT_BIN[@]}" -f "%Fc" "$1"
+
+    elif [ "${TIME_FROM_FULL_STAT}" -eq 1 ]; then
+        TEMP_ATIME=$("${STAT_BIN[@]}" "$1" | grep '^Change:' | awk '{print $2" "$3}')
+        TEMP_ATIME_SEC=$(date -d "${TEMP_ATIME}" +"%s")
+        TEMP_ATIME_NSEC=$("${STAT_BIN[@]}" "$1" | awk '/^Change:/{print $3}' | cut -d'.' -f2)
+        printf '%s.%s' "${TEMP_ATIME_SEC}" "${TEMP_ATIME_NSEC}"
     else
         "${STAT_BIN[@]}" --format "%.9Z" "$1"
     fi
@@ -340,6 +371,12 @@ function get_atime() {
     # ex: "1657504903.019784214"
     if [ "$(uname)" = "Darwin" ]; then
         "${STAT_BIN[@]}" -f "%Fa" "$1"
+
+    elif [ "${TIME_FROM_FULL_STAT}" -eq 1 ]; then
+        TEMP_ATIME=$("${STAT_BIN[@]}" "$1" | grep '^Access:' | grep -v 'Uid:' | awk '{print $2" "$3}')
+        TEMP_ATIME_SEC=$(date -d "${TEMP_ATIME}" +"%s")
+        TEMP_ATIME_NSEC=$("${STAT_BIN[@]}" "$1" | grep -v 'Uid:' | awk '/^Access:/{print $3}' | cut -d'.' -f2)
+        printf '%s.%s' "${TEMP_ATIME_SEC}" "${TEMP_ATIME_NSEC}"
     else
         "${STAT_BIN[@]}" --format "%.9X" "$1"
     fi
@@ -355,7 +392,7 @@ function get_permissions() {
 
 function get_user_and_group() {
     if [ "$(uname)" = "Darwin" ]; then
-        stat -f "%u:%g" "$1"
+        "${STAT_BIN[@]}" -f "%u:%g" "$1"
     else
         "${STAT_BIN[@]}" --format "%u:%g" "$1"
     fi
@@ -363,7 +400,10 @@ function get_user_and_group() {
 
 function check_content_type() {
     local INFO_STR
-    INFO_STR=$(aws_cli s3api head-object --bucket "${TEST_BUCKET_1}" --key "$1" | jq -r .ContentType)
+    TEMPNAME="$(mktemp)"
+    s3_head "${TEST_BUCKET_1}/$1" --dump-header "$TEMPNAME"
+    INFO_STR=$(sed -n 's/^Content-Type: //pi' "$TEMPNAME" | tr -d '\r\n')
+    rm -f "$TEMPNAME"
     if [ "${INFO_STR}" != "$2" ]
     then
         echo "Expected Content-Type: $2 but got: ${INFO_STR}"
@@ -377,27 +417,34 @@ function get_disk_avail_size() {
     echo "${DISK_AVAIL_SIZE}"
 }
 
-function aws_cli() {
-    local FLAGS=""
-    if [ -n "${S3FS_PROFILE}" ]; then
-        FLAGS="--profile ${S3FS_PROFILE}"
-    fi
+function s3_head() {
+    local S3_PATH=$1
+    shift
+    curl --aws-sigv4 "aws:amz:$S3_ENDPOINT:s3" --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" \
+        --cacert "$S3PROXY_CACERT_FILE" --fail --silent \
+        "$@" \
+        --head "$S3_URL/$S3_PATH"
+}
 
-    if [ "$1" = "s3" ] && [ "$2" != "ls" ] && [ "$2" != "mb" ]; then
-        if s3fs_args | grep -q use_sse=custom; then
-            FLAGS="${FLAGS} --sse-c AES256 --sse-c-key fileb:///tmp/ssekey.bin"
-        fi
-    elif [ "$1" = "s3api" ] && [ "$2" != "head-bucket" ]; then
-        if s3fs_args | grep -q use_sse=custom; then
-            FLAGS="${FLAGS} --sse-customer-algorithm AES256 --sse-customer-key $(cat /tmp/ssekey) --sse-customer-key-md5 $(cat /tmp/ssekeymd5)"
-        fi
-    fi
+function s3_mb() {
+    local S3_BUCKET=$1
+    curl --aws-sigv4 "aws:amz:$S3_ENDPOINT:s3" --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" \
+        --cacert "$S3PROXY_CACERT_FILE" --fail --silent \
+        --request PUT "$S3_URL/$S3_BUCKET"
+}
 
-    # [NOTE]
-    # AWS_EC2_METADATA_DISABLED for preventing the metadata service(to 169.254.169.254).
-    # shellcheck disable=SC2086,SC2068
-    # TODO: disable checksums to work around https://github.com/gaul/s3proxy/issues/760
-    AWS_EC2_METADATA_DISABLED=true AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED aws $@ --endpoint-url "${S3_URL}" --ca-bundle /tmp/keystore.pem ${FLAGS}
+function s3_cp() {
+    local S3_PATH=$1
+    shift
+    TEMPNAME="$(mktemp)"
+    cat > "$TEMPNAME"
+    # TODO: use filenames instead of stdin?
+    curl --aws-sigv4 "aws:amz:$S3_ENDPOINT:s3" --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" \
+        --cacert "$S3PROXY_CACERT_FILE" --fail --silent \
+        --header "Content-Length: $(wc -c < "$TEMPNAME")" \
+        "$@" \
+        --request PUT --data-binary "@$TEMPNAME" "$S3_URL/$S3_PATH"
+    rm -f "$TEMPNAME"
 }
 
 function wait_for_port() {

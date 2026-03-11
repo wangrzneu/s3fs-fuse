@@ -21,6 +21,7 @@
 #ifndef S3FS_COMMON_H_
 #define S3FS_COMMON_H_
 
+#include <atomic>
 #include <string>
 #include <sys/types.h>
 
@@ -38,6 +39,7 @@ extern bool           nomultipart;
 extern bool           pathrequeststyle;
 extern bool           complement_stat;
 extern bool           noxmlns;
+extern bool           insecure_logging;
 extern std::string    program_name;
 extern std::string    service_path;
 extern std::string    s3host;
@@ -45,6 +47,17 @@ extern std::string    mount_prefix;
 extern std::string    region;
 extern std::string    cipher_suites;
 extern std::string    instance_name;
+
+extern std::atomic<long long unsigned> num_requests_head_object;
+extern std::atomic<long long unsigned> num_requests_put_object;
+extern std::atomic<long long unsigned> num_requests_get_object;
+extern std::atomic<long long unsigned> num_requests_delete_object;
+extern std::atomic<long long unsigned> num_requests_list_bucket;
+extern std::atomic<long long unsigned> num_requests_mpu_initiate;
+extern std::atomic<long long unsigned> num_requests_mpu_complete;
+extern std::atomic<long long unsigned> num_requests_mpu_abort;
+extern std::atomic<long long unsigned> num_requests_mpu_upload_part;
+extern std::atomic<long long unsigned> num_requests_mpu_copy_part;
 
 //-------------------------------------------------------------------
 // For weak attribute
@@ -54,7 +67,7 @@ extern std::string    instance_name;
 //-------------------------------------------------------------------
 // For clang -Wthread-safety
 //-------------------------------------------------------------------
-#if defined(__clang__)
+#ifdef __clang__
 #define THREAD_ANNOTATION_ATTRIBUTE(x)   __attribute__((x))
 #else
 #define THREAD_ANNOTATION_ATTRIBUTE(x)   // no-op

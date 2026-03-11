@@ -20,7 +20,7 @@
 dnl Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.69])
-AC_INIT([s3fs],[1.95])
+AC_INIT([s3fs],[1.97])
 AC_CONFIG_HEADER([config.h])
 
 AC_CANONICAL_TARGET
@@ -34,7 +34,10 @@ AC_CHECK_HEADERS([attr/xattr.h])
 AC_CHECK_HEADERS([sys/extattr.h])
 AC_CHECK_FUNCS([fallocate])
 
-CXXFLAGS="-Wall -fno-exceptions -D_FILE_OFFSET_BITS=64 -D_FORTIFY_SOURCE=3 -std=c++14 $CXXFLAGS"
+CPP_VERSION=c++14
+AC_SUBST([CPP_VERSION])
+
+CXXFLAGS="-Wall -fno-exceptions -D_FILE_OFFSET_BITS=64 -D_FORTIFY_SOURCE=3 -std=$CPP_VERSION $CXXFLAGS"
 
 dnl ----------------------------------------------
 dnl For macOS

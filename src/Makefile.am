@@ -40,6 +40,7 @@ s3fs_SOURCES = \
     curl_util.cpp \
     s3objlist.cpp \
     cache.cpp \
+    cache_node.cpp \
     string_util.cpp \
     s3fs_cred.cpp \
     s3fs_util.cpp \
@@ -52,6 +53,7 @@ s3fs_SOURCES = \
     fdcache_fdinfo.cpp \
     fdcache_pseudofd.cpp \
     fdcache_untreated.cpp \
+    filetimes.cpp \
     addhead.cpp \
     sighandlers.cpp \
     threadpoolman.cpp \
@@ -102,7 +104,7 @@ TESTS = \
     test_string_util
 
 clang-tidy:
-	clang-tidy -extra-arg-before=-xc++ -extra-arg=-std=c++14 \
+	clang-tidy -extra-arg-before=-xc++ -extra-arg=-std=@CPP_VERSION@ \
 		*.h $(s3fs_SOURCES) test_curl_util.cpp test_page_list.cpp test_string_util.cpp \
 		-- $(DEPS_CFLAGS) $(CPPFLAGS)
 

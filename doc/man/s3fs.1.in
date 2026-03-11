@@ -180,10 +180,19 @@ This prevents delays in updates due to cache retention.
 However, it may increase the number of HeadObject requests to check if an object exists, which may decrease performance.
 .TP
 \fB\-o\fR no_check_certificate (by default this option is disabled)
-server certificate won't be checked against the available certificate authorities.
+Do not verify the server certificate against trusted certificate authorities.
+.B WARNING:
+This makes the connection vulnerable to man-in-the-middle attacks.
+Only use this option for testing with self-signed certificates.
+Do not use in production environments.
 .TP
-\fB\-o\fR ssl_verify_hostname (default="2")
-When 0, do not verify the SSL certificate against the hostname.
+\fB\-o\fR ssl_verify_hostname (default="1")
+When set to 1, verify that the server certificate matches the hostname.
+When set to 0, do not verify that the server certificate matches the hostname.
+.B WARNING:
+This makes the connection vulnerable to man-in-the-middle attacks.
+Only use this option for testing purposes.
+Do not use in production environments.
 .TP
 \fB\-o\fR ssl_client_cert (default="")
 Specify an SSL client certificate.
@@ -448,6 +457,11 @@ Put the debug message from libcurl when this option is specified.
 Specify "normal" or "body" for the parameter.
 If the parameter is omitted, it is the same as "normal".
 If "body" is specified, some API communication body data will be output in addition to the debug message output as "normal".
+.TP
+\fB\-o\fR insecure_logging - put insecure information to the log
+Normally, secure information(such as tokens and credentials) is not output to logs.
+Specifying this option will write these secure information to the log.
+Use caution when specifying this option, as sensitive authentication information will be output to the log.
 .TP
 \fB\-o\fR no_time_stamp_msg - no time stamp in debug message
 The time stamp is output to the debug message by default.

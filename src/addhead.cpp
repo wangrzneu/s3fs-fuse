@@ -26,9 +26,7 @@
 #include <string>
 #include <strings.h>
 #include <utility>
-#include <vector>
 
-#include "s3fs.h"
 #include "addhead.h"
 #include "curl_util.h"
 #include "s3fs_logger.h"
@@ -201,7 +199,6 @@ struct curl_slist* AdditionalHeader::AddHeader(struct curl_slist* list, const ch
         list = curl_slist_sort_insert(list, iter->first.c_str(), iter->second.c_str());
     }
     meta.clear();
-    S3FS_MALLOCTRIM(0);
     return list;
 }
 

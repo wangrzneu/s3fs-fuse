@@ -38,6 +38,9 @@
 #include "s3fs_util.h"
 #include "string_util.h"
 #include "s3fs_help.h"
+#include "curl.h"
+
+using namespace std::string_literals;
 
 //-------------------------------------------------------------------
 // Global variables
@@ -171,46 +174,40 @@ int is_uid_include_group(uid_t uid, gid_t gid)
 //
 static std::mutex basename_lock;
 
-std::string mydirname(const std::string& path)
+// safe variant of dirname
+// dirname clobbers path so let it operate on a tmp copy
+std::string mydirname(std::string path)
 {
     const std::lock_guard<std::mutex> lock(basename_lock);
 
-    return mydirname(path.c_str());
-}
-
-// safe variant of dirname
-// dirname clobbers path so let it operate on a tmp copy
-std::string mydirname(const char* path)
-{
-    if(!path || '\0' == path[0]){
+    if(path.empty()){
         return "";
     }
 
-    char *buf = strdup(path);
-    std::string result = dirname(buf);
-    free(buf);
-    return result;
-}
-
-std::string mybasename(const std::string& path)
-{
-    const std::lock_guard<std::mutex> data_lock(basename_lock);
-
-    return mybasename(path.c_str());
+    // [TODO]
+    // Currently, use "&str[pos]" to make it possible to build with C++14.
+    // Once we support C++17 or later, we will use "str.data()".
+    //
+    path.push_back('\0');     // terminate with a null character and allocate space for it.
+    return dirname(&path[0]); // NOLINT(readability-container-data-pointer)
 }
 
 // safe variant of basename
 // basename clobbers path so let it operate on a tmp copy
-std::string mybasename(const char* path)
+std::string mybasename(std::string path)
 {
-    if(!path || '\0' == path[0]){
+    const std::lock_guard<std::mutex> data_lock(basename_lock);
+
+    if(path.empty()){
         return "";
     }
 
-    char *buf = strdup(path);
-    std::string result = basename(buf);
-    free(buf);
-    return result;
+    // [TODO]
+    // Currently, use "&str[pos]" to make it possible to build with C++14.
+    // Once we support C++17 or later, we will use "str.data()".
+    //
+    path.push_back('\0');      // terminate with a null character and allocate space for it.
+    return basename(&path[0]); // NOLINT(readability-container-data-pointer)
 }
 
 // mkdir --parents
@@ -239,7 +236,7 @@ int mkdirp(const std::string& path, mode_t mode)
 // get existed directory path
 std::string get_exist_directory_path(const std::string& path)
 {
-    std::string        existed("/");    // "/" is existed.
+    std::string        existed = "/"s;    // "/" is existed.
     std::string        base;
     std::string        component;
     std::istringstream ss(path);
@@ -307,13 +304,18 @@ bool check_exist_dir_permission(const char* dirpath)
 
 bool delete_files_in_dir(const char* dir, bool is_remove_own)
 {
-    DIR*           dp;
-    struct dirent* dent;
+    DIR*                 dp;
+    const struct dirent* dent;
 
     if(nullptr == (dp = opendir(dir))){
         S3FS_PRN_ERR("could not open dir(%s) - errno(%d)", dir, errno);
         return false;
     }
+    scope_guard dir_guard([dp, dir]() {
+        if(-1 == closedir(dp)){
+            S3FS_PRN_ERR("closedir() failed for %s - errno(%d)", dir, errno);
+        }
+    });
 
     for(dent = readdir(dp); dent; dent = readdir(dp)){
         if(0 == strcmp(dent->d_name, "..") || 0 == strcmp(dent->d_name, ".")){
@@ -325,25 +327,21 @@ bool delete_files_in_dir(const char* dir, bool is_remove_own)
         struct stat st;
         if(0 != lstat(fullpath.c_str(), &st)){
             S3FS_PRN_ERR("could not get stats of file(%s) - errno(%d)", fullpath.c_str(), errno);
-            closedir(dp);
             return false;
         }
         if(S_ISDIR(st.st_mode)){
             // dir -> Reentrant
             if(!delete_files_in_dir(fullpath.c_str(), true)){
                 S3FS_PRN_ERR("could not remove sub dir(%s) - errno(%d)", fullpath.c_str(), errno);
-                closedir(dp);
                 return false;
             }
         }else{
             if(0 != unlink(fullpath.c_str())){
                 S3FS_PRN_ERR("could not remove file(%s) - errno(%d)", fullpath.c_str(), errno);
-                closedir(dp);
                 return false;
             }
         }
     }
-    closedir(dp);
 
     if(is_remove_own && 0 != rmdir(dir)){
         S3FS_PRN_ERR("could not remove dir(%s) - errno(%d)", dir, errno);
@@ -397,130 +395,29 @@ void print_launch_message(int argc, char** argv)
                 if(0 == cnt){
                     message += basename(argv[cnt]);
                 }else{
-                    message += argv[cnt];
+                    if(!insecure_logging){
+                        message += mask_sensitive_arg(argv[cnt]);
+                    }else{
+                        message += argv[cnt];
+                    }
                 }
             }
         }
     }
     S3FS_PRN_LAUNCH_INFO("%s", message.c_str());
-}
 
-//
-// result: -1  ts1 <  ts2
-//          0  ts1 == ts2
-//          1  ts1 >  ts2
-//
-constexpr int compare_timespec(const struct timespec& ts1, const struct timespec& ts2)
-{
-    if(ts1.tv_sec < ts2.tv_sec){
-        return -1;
-    }else if(ts1.tv_sec > ts2.tv_sec){
-        return 1;
-    }else{
-        if(ts1.tv_nsec < ts2.tv_nsec){
-            return -1;
-        }else if(ts1.tv_nsec > ts2.tv_nsec){
-            return 1;
-        }
+    // Special message when insecure logging is enabled
+    if(insecure_logging){
+        S3FS_PRN_LAUNCH_INFO("%s", "[INSECURE] Deprecated option(insecure_logging) is specified. Authentication information such as tokens and credentials is output to the log.");
     }
-    return 0;
-}
 
-//
-// result: -1  st <  ts
-//          0  st == ts
-//          1  st >  ts
-//
-int compare_timespec(const struct stat& st, stat_time_type type, const struct timespec& ts)
-{
-    struct timespec st_ts;
-    set_stat_to_timespec(st, type, st_ts);
-
-    return compare_timespec(st_ts, ts);
-}
-
-void set_timespec_to_stat(struct stat& st, stat_time_type type, const struct timespec& ts)
-{
-    if(stat_time_type::ATIME == type){
-        #if defined(__APPLE__)
-            st.st_atime             = ts.tv_sec;
-            st.st_atimespec.tv_nsec = ts.tv_nsec;
-        #else
-            st.st_atim.tv_sec       = ts.tv_sec;
-            st.st_atim.tv_nsec      = ts.tv_nsec;
-        #endif
-    }else if(stat_time_type::MTIME == type){
-        #if defined(__APPLE__)
-            st.st_mtime             = ts.tv_sec;
-            st.st_mtimespec.tv_nsec = ts.tv_nsec;
-        #else
-            st.st_mtim.tv_sec       = ts.tv_sec;
-            st.st_mtim.tv_nsec      = ts.tv_nsec;
-        #endif
-    }else if(stat_time_type::CTIME == type){
-        #if defined(__APPLE__)
-            st.st_ctime             = ts.tv_sec;
-            st.st_ctimespec.tv_nsec = ts.tv_nsec;
-        #else
-            st.st_ctim.tv_sec       = ts.tv_sec;
-            st.st_ctim.tv_nsec      = ts.tv_nsec;
-        #endif
-    }else{
-        S3FS_PRN_ERR("unknown type(%d), so skip to set value.", static_cast<int>(type));
+    // Warn about disabled SSL verification (MITM vulnerability)
+    if(0 == S3fsCurl::GetSslVerifyHostname()){
+        S3FS_PRN_LAUNCH_INFO("%s", "SSL hostname verification is DISABLED (ssl_verify_hostname=0). Connections are vulnerable to MITM attacks.");
     }
-}
-
-struct timespec* set_stat_to_timespec(const struct stat& st, stat_time_type type, struct timespec& ts)
-{
-    if(stat_time_type::ATIME == type){
-        #if defined(__APPLE__)
-           ts.tv_sec  = st.st_atime;
-           ts.tv_nsec = st.st_atimespec.tv_nsec;
-        #else
-           ts         = st.st_atim;
-        #endif
-    }else if(stat_time_type::MTIME == type){
-        #if defined(__APPLE__)
-           ts.tv_sec  = st.st_mtime;
-           ts.tv_nsec = st.st_mtimespec.tv_nsec;
-        #else
-           ts         = st.st_mtim;
-        #endif
-    }else if(stat_time_type::CTIME == type){
-        #if defined(__APPLE__)
-           ts.tv_sec  = st.st_ctime;
-           ts.tv_nsec = st.st_ctimespec.tv_nsec;
-        #else
-           ts         = st.st_ctim;
-        #endif
-    }else{
-        S3FS_PRN_ERR("unknown type(%d), so use 0 as timespec.", static_cast<int>(type));
-        ts.tv_sec     = 0;
-        ts.tv_nsec    = 0;
+    if(!S3fsCurl::IsCertCheck()){
+        S3FS_PRN_LAUNCH_INFO("%s", "SSL certificate verification is DISABLED (no_check_certificate). Connections are vulnerable to MITM attacks.");
     }
-    return &ts;
-}
-
-std::string str_stat_time(const struct stat& st, stat_time_type type)
-{
-    struct timespec ts;
-    return str(*set_stat_to_timespec(st, type, ts));
-}
-
-struct timespec* s3fs_realtime(struct timespec& ts)
-{
-    if(-1 == clock_gettime(static_cast<clockid_t>(CLOCK_REALTIME), &ts)){
-        S3FS_PRN_WARN("failed to clock_gettime by errno(%d)", errno);
-        ts.tv_sec  = time(nullptr);
-        ts.tv_nsec = 0;
-    }
-    return &ts;
-}
-
-std::string s3fs_str_realtime()
-{
-    struct timespec ts;
-    return str(*s3fs_realtime(ts));
 }
 
 int s3fs_fclose(FILE* fp)
@@ -529,6 +426,14 @@ int s3fs_fclose(FILE* fp)
         return 0;
     }
     return fclose(fp);
+}
+
+//-------------------------------------------------------------------
+// Utilities for secure credential strings
+//-------------------------------------------------------------------
+const char* mask_sensitive_string(const char* sensitive)
+{
+    return mask_sensitive_string_with_flag(sensitive, insecure_logging);
 }
 
 /*

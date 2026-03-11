@@ -26,9 +26,10 @@
 #include "common.h"
 #include "metaheader.h"
 #include "string_util.h"
-#include "s3fs_util.h"
+#include "filetimes.h"
 
-static constexpr struct timespec DEFAULT_TIMESPEC = {-1, 0};
+static constexpr struct timespec ERROR_TIMESPEC = {-1, 0};
+static constexpr struct timespec OMIT_TIMESPEC  = {0, UTIME_OMIT};
 
 //-------------------------------------------------------------------
 // Utility functions for convert
@@ -59,52 +60,53 @@ static struct timespec get_time(const headers_t& meta, const char *header)
 {
     headers_t::const_iterator iter;
     if(meta.cend() == (iter = meta.find(header))){
-        return DEFAULT_TIMESPEC;
+        return ERROR_TIMESPEC;
     }
     return cvt_string_to_time((*iter).second.c_str());
 }
 
 struct timespec get_mtime(const headers_t& meta, bool overcheck)
 {
-    struct timespec t = get_time(meta, "x-amz-meta-mtime");
-    if(0 < t.tv_sec){
-        return t;
+    struct timespec mtime = get_time(meta, "x-amz-meta-mtime");
+    if(0 <= mtime.tv_sec && UTIME_OMIT != mtime.tv_nsec){
+        return mtime;
     }
-    t = get_time(meta, "x-amz-meta-goog-reserved-file-mtime");
-    if(0 < t.tv_sec){
-        return t;
+
+    mtime = get_time(meta, "x-amz-meta-goog-reserved-file-mtime");
+    if(0 <= mtime.tv_sec && UTIME_OMIT != mtime.tv_nsec){
+        return mtime;
     }
     if(overcheck){
-        struct timespec ts = {get_lastmodified(meta), 0};
-        return ts;
+        mtime = {get_lastmodified(meta), 0};
+        return mtime;
     }
-    return DEFAULT_TIMESPEC;
+    return OMIT_TIMESPEC;
 }
 
 struct timespec get_ctime(const headers_t& meta, bool overcheck)
 {
-    struct timespec t = get_time(meta, "x-amz-meta-ctime");
-    if(0 < t.tv_sec){
-        return t;
+    struct timespec ctime = get_time(meta, "x-amz-meta-ctime");
+    if(0 <= ctime.tv_sec && UTIME_OMIT != ctime.tv_nsec){
+        return ctime;
     }
     if(overcheck){
-        struct timespec ts = {get_lastmodified(meta), 0};
-        return ts;
+        ctime = {get_lastmodified(meta), 0};
+        return ctime;
     }
-    return DEFAULT_TIMESPEC;
+    return OMIT_TIMESPEC;
 }
 
 struct timespec get_atime(const headers_t& meta, bool overcheck)
 {
-    struct timespec t = get_time(meta, "x-amz-meta-atime");
-    if(0 < t.tv_sec){
-        return t;
+    struct timespec atime = get_time(meta, "x-amz-meta-atime");
+    if(0 <= atime.tv_sec && UTIME_OMIT != atime.tv_nsec){
+        return atime;
     }
     if(overcheck){
-        struct timespec ts = {get_lastmodified(meta), 0};
-        return ts;
+        atime = {get_lastmodified(meta), 0};
+        return atime;
     }
-    return DEFAULT_TIMESPEC;
+    return OMIT_TIMESPEC;
 }
 
 off_t get_size(const char *s)
@@ -204,6 +206,105 @@ mode_t get_mode(const headers_t& meta, const std::string& strpath, bool checkdir
         }
     }
     return mode;
+}
+
+// [NOTE]
+// Gets a only FMT bit in mode from meta headers.
+// The processing is almost the same as get_mode().
+// This function is intended to be used from get_object_attribute().
+//
+static mode_t convert_meta_to_mode_fmt(const headers_t& meta)
+{
+    mode_t mode = 0;
+    bool   isS3sync = false;
+    headers_t::const_iterator iter;
+
+    if(meta.cend() != (iter = meta.find("x-amz-meta-mode"))){
+        mode = get_mode((*iter).second.c_str());
+    }else if(meta.cend() != (iter = meta.find("x-amz-meta-permissions"))){ // for s3sync
+        mode = get_mode((*iter).second.c_str());
+        isS3sync = true;
+    }else if(meta.cend() != (iter = meta.find("x-amz-meta-goog-reserved-posix-mode"))){ // for GCS
+        mode = get_mode((*iter).second.c_str(), 8);
+    }
+
+    if(!(mode & S_IFMT)){
+        if(!isS3sync){
+            if(meta.cend() != (iter = meta.find("Content-Type"))){
+                std::string strConType = (*iter).second;
+                // Leave just the mime type, remove any optional parameters (eg charset)
+                std::string::size_type pos = strConType.find(';');
+                if(std::string::npos != pos){
+                    strConType.erase(pos);
+                }
+                if(strConType == "application/x-directory" || strConType == "httpd/unix-directory"){
+                    // Nextcloud uses this MIME type for directory objects when mounting bucket as external Storage
+                    mode |= S_IFDIR;
+                }
+            }
+        }
+    }
+    return (mode & S_IFMT);
+}
+
+bool is_reg_fmt(const headers_t& meta)
+{
+    return S_ISREG(convert_meta_to_mode_fmt(meta));
+}
+
+bool is_symlink_fmt(const headers_t& meta)
+{
+    return S_ISLNK(convert_meta_to_mode_fmt(meta));
+}
+
+bool is_dir_fmt(const headers_t& meta)
+{
+    return S_ISDIR(convert_meta_to_mode_fmt(meta));
+}
+
+// [NOTE]
+// For directory types, detailed judgment is not possible.
+// DIR_NORMAL is always returned.
+//
+// Objects uploaded using clients other than s3fs has a Content-Type
+// of application/unknown and dose not have x-amz-meta-mode header.
+// In this case, you can specify objtype_t as default_type.
+//
+objtype_t derive_object_type(const std::string& strpath, const headers_t& meta, objtype_t default_type)
+{
+    mode_t mode = convert_meta_to_mode_fmt(meta);
+
+    if(S_ISDIR(mode)){
+        if('/' != *strpath.rbegin()){
+            return objtype_t::DIR_NOT_TERMINATE_SLASH;
+        }else if(std::string::npos != strpath.find("_$folder$", 0)){
+            return objtype_t::DIR_FOLDER_SUFFIX;
+        }else{
+            // [NOTE]
+            // It returns DIR_NORMAL, although it could be DIR_NOT_EXIST_OBJECT.
+            //
+            return objtype_t::DIR_NORMAL;
+        }
+    }else if(S_ISLNK(mode)){
+        return objtype_t::SYMLINK;
+    }else if(S_ISREG(mode)){
+        return objtype_t::FILE;
+    }else if(0 == mode){
+        // If the x-amz-meta-mode header is not present, mode is 0.
+        headers_t::const_iterator iter;
+        if(meta.cend() != (iter = meta.find("Content-Type"))){
+            std::string strConType = iter->second;
+            // Leave just the mime type, remove any optional parameters (eg charset)
+            std::string::size_type pos = strConType.find(';');
+            if(std::string::npos != pos){
+                strConType.erase(pos);
+            }
+            if(strConType == "application/unknown"){
+                return default_type;
+            }
+        }
+    }
+    return objtype_t::UNKNOWN;
 }
 
 uid_t get_uid(const char *s)
@@ -330,70 +431,53 @@ bool merge_headers(headers_t& base, const headers_t& additional, bool add_noexis
     return added;
 }
 
-bool convert_header_to_stat(const char* path, const headers_t& meta, struct stat* pst, bool forcedir)
+bool convert_header_to_stat(const std::string& strpath, const headers_t& meta, struct stat& stbuf, bool forcedir)
 {
-    if(!path || !pst){
-        return false;
-    }
-    *pst = {};
+    stbuf = {};
 
-    pst->st_nlink = 1; // see fuse FAQ
+    // set hard link count always 1
+    stbuf.st_nlink = 1; // see fuse FAQ
 
     // mode
-    pst->st_mode = get_mode(meta, path, true, forcedir);
+    stbuf.st_mode = get_mode(meta, strpath, true, forcedir);
 
     // blocks
-    if(S_ISREG(pst->st_mode)){
-        pst->st_blocks = get_blocks(pst->st_size);
+    if(S_ISREG(stbuf.st_mode)){
+        stbuf.st_blocks = get_blocks(stbuf.st_size);
     }
-    pst->st_blksize = 4096;
+    stbuf.st_blksize = 4096;
 
     // mtime
     struct timespec mtime = get_mtime(meta);
-    if(pst->st_mtime < 0){
-        pst->st_mtime = 0L;
-    }else{
-        if(mtime.tv_sec < 0){
-            mtime.tv_sec  = 0;
-            mtime.tv_nsec = 0;
-        }
-        set_timespec_to_stat(*pst, stat_time_type::MTIME, mtime);
+    if(mtime.tv_sec < 0){
+        mtime = {0, 0};
     }
+    set_timespec_to_stat(stbuf, stat_time_type::MTIME, mtime);
 
     // ctime
     struct timespec ctime = get_ctime(meta);
-    if(pst->st_ctime < 0){
-        pst->st_ctime = 0L;
-    }else{
-        if(ctime.tv_sec < 0){
-            ctime.tv_sec  = 0;
-            ctime.tv_nsec = 0;
-        }
-        set_timespec_to_stat(*pst, stat_time_type::CTIME, ctime);
+    if(ctime.tv_sec < 0){
+        ctime = {0, 0};
     }
+    set_timespec_to_stat(stbuf, stat_time_type::CTIME, ctime);
 
     // atime
     struct timespec atime = get_atime(meta);
-    if(pst->st_atime < 0){
-        pst->st_atime = 0L;
-    }else{
-        if(atime.tv_sec < 0){
-            atime.tv_sec  = 0;
-            atime.tv_nsec = 0;
-        }
-        set_timespec_to_stat(*pst, stat_time_type::ATIME, atime);
+    if(atime.tv_sec < 0){
+        atime = {0, 0};
     }
+    set_timespec_to_stat(stbuf, stat_time_type::ATIME, atime);
 
     // size
-    if(S_ISDIR(pst->st_mode)){
-        pst->st_size = 4096;
+    if(S_ISDIR(stbuf.st_mode)){
+        stbuf.st_size = 4096;
     }else{
-        pst->st_size = get_size(meta);
+        stbuf.st_size = get_size(meta);
     }
 
     // uid/gid
-    pst->st_uid = get_uid(meta);
-    pst->st_gid = get_gid(meta);
+    stbuf.st_uid = get_uid(meta);
+    stbuf.st_gid = get_gid(meta);
 
     return true;
 }

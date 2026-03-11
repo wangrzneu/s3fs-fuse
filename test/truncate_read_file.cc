@@ -20,8 +20,6 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -34,7 +32,7 @@
 int main(int argc, const char *argv[])
 {
     if(argc != 3){
-        fprintf(stderr, "[ERROR] Wrong paraemters\n");
+        fprintf(stderr, "[ERROR] Wrong parameters\n");
         fprintf(stdout, "[Usage] truncate_read_file <file path> <truncate size(bytes)>\n");
         exit(EXIT_FAILURE);
     }

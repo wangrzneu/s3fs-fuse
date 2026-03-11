@@ -49,18 +49,20 @@ jobs:
       #
       matrix:
         container:
-          - ubuntu:25.04
+          - ubuntu:25.10
           - ubuntu:24.04
           - ubuntu:22.04
+          - debian:trixie
           - debian:bookworm
           - debian:bullseye
           - rockylinux/rockylinux:10
-          - rockylinux:9
-          - rockylinux:8
+          - rockylinux/rockylinux:9
+          - rockylinux/rockylinux:8
+          - fedora:43
           - fedora:42
-          - fedora:41
           - opensuse/leap:15
-          - alpine:3.22
+          - opensuse/leap:16.0
+          - alpine:3.23
 
     container:
       image: ${{ matrix.container }}
@@ -76,10 +78,13 @@ jobs:
       # [NOTE]
       # On openSUSE, tar and gzip must be installed before action/checkout.
       #
-      - name: Install packages before checkout
-        if: matrix.container == 'opensuse/leap:15'
-        run: |
-          zypper install -y tar gzip
+      - name: Install openSUSE packages before checkout
+        if: matrix.container == 'opensuse/leap:15' || matrix.container == 'opensuse/leap:16.0'
+        run: zypper install -y tar gzip
+
+      - name: Install Alpine packages before checkout
+        if: matrix.container == 'alpine:3.23'
+        run: apk add --no-progress --no-cache bash
 
       - name: Checkout source code
         uses: actions/checkout@v4
@@ -111,8 +116,15 @@ jobs:
   #   This job doesn't work with GitHub Actions using macOS 11+ because "load_osxfuse" returns
   #   "exit code = 1".(requires OS reboot)
   #
-  macos-13:
-    runs-on: macos-13
+  macos-14:
+    runs-on: macos-14
+
+    # [NOTE]
+    # In macos-14 (and maybe later), the location of the CA certificate is different and you need to specify it.
+    # We give the CA path as an environment variable.
+    #
+    env:
+        CURL_CA_BUNDLE: "/opt/homebrew/etc/ca-certificates/cert.pem"
 
     steps:
       - name: Checkout source code
@@ -127,38 +139,33 @@ jobs:
 
       - name: Install fuse-t
         run: |
+          if [ ! -d /usr/local/include ]; then sudo mkdir -p /usr/local/include; echo "Created /usr/local/include directory"; fi
           HOMEBREW_NO_AUTO_UPDATE=1 brew install fuse-t
 
       - name: Install brew other packages
         run: |
-          S3FS_BREW_PACKAGES='automake cppcheck python3 coreutils gnu-sed shellcheck jq';
-          for s3fs_brew_pkg in ${S3FS_BREW_PACKAGES}; do
-            if brew list | grep -q ${s3fs_brew_pkg}; then if brew outdated | grep -q ${s3fs_brew_pkg}; then HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade ${s3fs_brew_pkg}; fi; else HOMEBREW_NO_AUTO_UPDATE=1 brew install ${s3fs_brew_pkg}; fi
-          done
-
-      - name: Install awscli2
-        run: |
-          curl "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o /tmp/AWSCLIV2.pkg
-          sudo installer -pkg /tmp/AWSCLIV2.pkg -target /
+          S3FS_BREW_PACKAGES=(
+            automake
+            coreutils
+            cppcheck
+            jq
+            python3
+            shellcheck
+          )
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install "${S3FS_BREW_PACKAGES[@]}"
+          HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade "${S3FS_BREW_PACKAGES[@]}"
 
       - name: Build
         run: |
           ./autogen.sh
-          PKG_CONFIG_PATH=/usr/local/opt/curl/lib/pkgconfig:/usr/local/opt/openssl/lib/pkgconfig ./configure CXXFLAGS='-std=c++14 -DS3FS_PTHREAD_ERRORCHECK=1'
+          PKG_CONFIG_PATH=/usr/local/opt/curl/lib/pkgconfig:/usr/local/opt/openssl/lib/pkgconfig ./configure
           make --jobs=$(sysctl -n hw.ncpu)
 
       - name: Cppcheck
-        run: |
-          # specify the version range to run cppcheck (cppcheck version number is x.y or x.y.z)
-          if cppcheck --version | sed -e 's/\./ /g' | awk '{if (($2 * 1000 + $3) <= 2004) { exit(1) } }'; then
-            make cppcheck
-          fi
+        run: make cppcheck
 
       - name: Shellcheck
-        run: |
-          if shellcheck --version | awk -F '[ .]' '/version:/ && ($2 * 1000 + $3 <= 7) { exit(1) }'; then
-            make shellcheck
-          fi
+        run: make shellcheck
 
       - name: Test suite
         run: |
@@ -194,7 +201,7 @@ jobs:
           - valgrind
 
     container:
-      image: fedora:42
+      image: fedora:43
 
       options: "--privileged --cap-add SYS_ADMIN --device /dev/fuse"
 
@@ -204,21 +211,25 @@ jobs:
 
       - name: Install packages
         run: |
-          .github/workflows/linux-ci-helper.sh fedora:42
+          .github/workflows/linux-ci-helper.sh fedora:43
 
       - name: Install clang
         run: |
-          dnf install -y clang
-          if [ "${{ matrix.checktype }}" = "valgrind" ]; then
-              dnf install -y valgrind
-          fi
+          dnf install -y \
+            clang \
+            libcxx \
+            libcxx-devel
+
+      - name: Install Valgrind
+        if: matrix.checktype == 'valgrind'
+        run: dnf install -y valgrind
 
       #
       # Set CXX/CXXFLAGS and Variables for test
       #
       - name: Set variables
         run: |
-          COMMON_CXXFLAGS='-g -Wno-cpp -DS3FS_PTHREAD_ERRORCHECK=1'
+          COMMON_CXXFLAGS='-g -Wno-cpp'
           {
             if [ "${{ matrix.checktype }}" = "glibc_debug" ]; then
                 echo "CXXFLAGS=${COMMON_CXXFLAGS} -O0 -D_GLIBCXX_DEBUG"
@@ -256,7 +267,7 @@ jobs:
         run: |
           ./autogen.sh
           /bin/sh -c "CXX=${CXX} CXXFLAGS=\"${CXXFLAGS}\" LDFLAGS=\"${LDFLAGS}\" ./configure --prefix=/usr --with-openssl"
-          make
+          make --jobs=$(nproc)
 
       - name: Test suite
         run: |
@@ -265,7 +276,7 @@ jobs:
   static-checks:
     runs-on: ubuntu-latest
     container:
-      image: fedora:42
+      image: fedora:43
 
     steps:
       - name: Checkout source code
@@ -273,7 +284,15 @@ jobs:
 
       - name: Install packages
         run: |
-          .github/workflows/linux-ci-helper.sh fedora:42
+          .github/workflows/linux-ci-helper.sh fedora:43
+
+      - name: Install extra packages
+        run: |
+          dnf install -y \
+            clang-tools-extra \
+            cppcheck \
+            python3 \
+            ShellCheck
 
       - name: Build
         run: |

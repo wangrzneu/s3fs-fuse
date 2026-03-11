@@ -4594,7 +4594,7 @@ static void* s3fs_init(struct fuse_conn_info* conn)
          conn->want |= FUSE_CAP_ATOMIC_O_TRUNC;
     }
     #endif
-#if FUSE_USE_VERSION >= 30
+#ifdef FUSE_CAP_ALLOW_IDMAP
     // enable ID MAP
     conn->want_ext |= FUSE_CAP_ALLOW_IDMAP;
 #endif

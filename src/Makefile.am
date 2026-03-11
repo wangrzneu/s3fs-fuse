@@ -56,6 +56,7 @@ s3fs_SOURCES = \
     filetimes.cpp \
     addhead.cpp \
     sighandlers.cpp \
+    storage_metrics.cpp \
     threadpoolman.cpp \
     syncfiller.cpp \
     common_auth.cpp

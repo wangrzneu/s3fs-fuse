@@ -59,6 +59,7 @@
 #include "s3fs_threadreqs.h"
 #include "mpu_util.h"
 #include "threadpoolman.h"
+#include "storage_metrics.h"
 
 //-------------------------------------------------------------------
 // Symbols
@@ -110,6 +111,8 @@ static off_t fake_diskfree_size   = -1; // default is not set(-1)
 static bool update_parent_dir_stat= false;  // default not updating parent directory stats
 static fsblkcnt_t bucket_block_count;                       // advertised block count of the bucket
 static unsigned long s3fs_block_size = 16 * 1024 * 1024;    // s3fs block size is 16MB
+static bool storage_metrics_enabled  = false;               // enable dynamic storage capacity tracking
+static int  storage_metrics_interval = 21600;               // re-scan interval in seconds (default 6 hours)
 
 //-------------------------------------------------------------------
 // Static functions : prototype
@@ -1309,8 +1312,22 @@ static int s3fs_unlink(const char* _path)
         return result;
     }
 
+    // Get file size before deletion for storage metrics tracking
+    off_t file_size = 0;
+    if(StorageMetrics::IsEnabled() && StorageMetrics::IsScanComplete()){
+        struct stat stbuf = {};
+        if(0 == get_object_attribute(strPath.c_str(), &stbuf)){
+            file_size = stbuf.st_size;
+        }
+    }
+
     if(0 != (result = delete_request(strPath))){
         return result;
+    }
+
+    // Update storage metrics
+    if(file_size > 0){
+        StorageMetrics::SubBytes(static_cast<int64_t>(file_size));
     }
 
     // remove file cache and stat cache
@@ -3180,25 +3197,30 @@ static int s3fs_statfs(const char* _path, struct statvfs* stbuf)
     // WTF8_ENCODE(path)
     stbuf->f_bsize   = s3fs_block_size;
     stbuf->f_namemax = NAME_MAX;
+    stbuf->f_frsize  = stbuf->f_bsize;
+    stbuf->f_blocks  = bucket_block_count;
 
-#ifdef __MSYS__
-    // WinFsp resolves the free space from f_bfree * f_frsize, and the total space from f_blocks * f_frsize (in bytes).
-    stbuf->f_blocks = bucket_block_count;
-    stbuf->f_frsize = stbuf->f_bsize;
-    stbuf->f_bfree  = stbuf->f_blocks;
-#elif defined(__APPLE__)
-    stbuf->f_blocks = bucket_block_count;
-    stbuf->f_frsize = stbuf->f_bsize;
-    stbuf->f_bfree  = stbuf->f_blocks;
+    // Calculate used/free blocks from storage metrics if available
+    fsblkcnt_t used_blocks = 0;
+    if(StorageMetrics::IsEnabled() && StorageMetrics::IsScanComplete()){
+        int64_t used_bytes = StorageMetrics::GetUsedBytes();
+        if(used_bytes > 0){
+            used_blocks = static_cast<fsblkcnt_t>((static_cast<uint64_t>(used_bytes) + s3fs_block_size - 1) / s3fs_block_size);
+        }
+        if(used_blocks > stbuf->f_blocks){
+            used_blocks = stbuf->f_blocks;
+        }
+        stbuf->f_bfree  = stbuf->f_blocks - used_blocks;
+    }else{
+        stbuf->f_bfree  = stbuf->f_blocks;
+    }
+    stbuf->f_bavail = stbuf->f_bfree;
+
+#ifdef __APPLE__
     stbuf->f_files  = UINT32_MAX;
     stbuf->f_ffree  = UINT32_MAX;
     stbuf->f_favail = UINT32_MAX;
-#else
-    stbuf->f_frsize = stbuf->f_bsize;
-    stbuf->f_blocks = bucket_block_count;
-    stbuf->f_bfree  = stbuf->f_blocks;
 #endif
-    stbuf->f_bavail = stbuf->f_blocks;
 
     return 0;
 }
@@ -3227,6 +3249,15 @@ static int s3fs_flush(const char* _path, struct fuse_file_info* fi)
     FdEntity*    ent;
     if(nullptr != (ent = autoent.GetExistFdEntity(path, static_cast<int>(fi->fh)))){
         bool is_new_file = ent->IsDirtyNewFile();
+
+        // Get size before flush for storage metrics delta tracking
+        off_t old_size = 0;
+        if(StorageMetrics::IsEnabled() && StorageMetrics::IsScanComplete()){
+            struct stat pre_stbuf = {};
+            if(!is_new_file && 0 == get_object_attribute(path, &pre_stbuf)){
+                old_size = pre_stbuf.st_size;
+            }
+        }
 
         if(0 == (result = ent->Flush(static_cast<int>(fi->fh), false))){
             // [NOTE]
@@ -3258,6 +3289,18 @@ static int s3fs_flush(const char* _path, struct fuse_file_info* fi)
             int update_result;
             if(0 != (update_result = update_mctime_parent_directory(path))){
                 S3FS_PRN_ERR("succeed to create the file(%s), but could not update timestamp of its parent directory(result=%d).", path, update_result);
+            }
+        }
+
+        // Update storage metrics with size delta after successful flush
+        if(StorageMetrics::IsEnabled() && StorageMetrics::IsScanComplete() && 0 == result){
+            off_t new_size = 0;
+            ent->GetSize(new_size);
+            int64_t delta = static_cast<int64_t>(new_size) - static_cast<int64_t>(old_size);
+            if(delta > 0){
+                StorageMetrics::AddBytes(delta);
+            }else if(delta < 0){
+                StorageMetrics::SubBytes(-delta);
             }
         }
     }
@@ -4567,12 +4610,20 @@ static void* s3fs_init(struct fuse_conn_info* conn)
         S3FS_PRN_ERR("Failed to initialize signal object, but continue...");
     }
 
+    // Storage metrics (background bucket size scan)
+    if(!StorageMetrics::Initialize(storage_metrics_enabled, storage_metrics_interval)){
+        S3FS_PRN_ERR("Failed to initialize storage metrics, but continue...");
+    }
+
     return nullptr;
 }
 
 static void s3fs_destroy(void*)
 {
     S3FS_PRN_INFO("destroy");
+
+    // Storage metrics
+    StorageMetrics::Destroy();
 
     // Signal object
     if(!S3fsSignals::Destroy()){
@@ -5188,6 +5239,18 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
             bucket_block_count = parse_bucket_size(strchr(arg, '=') + sizeof(char));
             if(0 == bucket_block_count){
                 S3FS_PRN_EXIT("invalid bucket_size option.");
+                return -1;
+            }
+            return 0;
+        }
+        else if(0 == strcmp(arg, "storage_metrics")){
+            storage_metrics_enabled = true;
+            return 0;
+        }
+        else if(is_prefix(arg, "storage_metrics_interval=")){
+            storage_metrics_interval = static_cast<int>(cvt_strtoofft(strchr(arg, '=') + sizeof(char), /*base=*/ 10));
+            if(storage_metrics_interval < 60){
+                S3FS_PRN_EXIT("storage_metrics_interval must be at least 60 seconds.");
                 return -1;
             }
             return 0;

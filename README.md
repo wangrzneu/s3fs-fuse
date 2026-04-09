@@ -150,6 +150,28 @@ chmod 600 /etc/passwd-s3fs
 
 Note2: You may also need to make sure `netfs` service is start on boot
 
+## Redis metadata cache and dynamic capacity
+
+You can enable Redis metadata backend with `-o redis_meta=redis://host:port/db`.
+
+When `-o capacity_mode=redis` is enabled, `statfs` capacity fields are computed from:
+
+* total size from `bucket_size` (defaults to `1TiB` if `bucket_size` is not explicitly set)
+* used bytes from metadata backend counters
+* free bytes clamped to zero when used bytes exceed total size
+
+Timeouts for metadata backend can be configured with `-o redis_connect_timeout` and `-o redis_readwrite_timeout` (milliseconds).
+
+Example:
+
+```
+s3fs mybucket /path/to/mountpoint \
+  -o passwd_file=${HOME}/.passwd-s3fs \
+  -o redis_meta=redis://127.0.0.1:6379/0 \
+  -o capacity_mode=redis \
+  -o bucket_size=2TiB
+```
+
 ## Limitations
 
 Generally S3 cannot offer the same performance or semantics as a local file system.  More specifically:

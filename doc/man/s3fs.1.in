@@ -241,6 +241,22 @@ size; however, since this may confuse other software which
 uses s3fs, the advertised bucket size can be set with this
 option.
 .TP
+\fB\-o\fR capacity_mode (default="legacy")
+Controls how s3fs reports capacity fields in statvfs.
+"legacy" keeps historical behavior.
+"redis" uses metadata backend used-bytes counters and treats bucket_size as total capacity.
+In "redis" mode, if bucket_size is not explicitly set, total capacity defaults to 1TiB.
+.TP
+\fB\-o\fR redis_meta (default="")
+URI for Redis metadata backend, for example: redis://127.0.0.1:6379/0
+When empty, Redis metadata backend is disabled and s3fs falls back to local behavior.
+.TP
+\fB\-o\fR redis_connect_timeout (default="100")
+Connection timeout in milliseconds for Redis metadata backend.
+.TP
+\fB\-o\fR redis_readwrite_timeout (default="100")
+Read/write timeout in milliseconds for Redis metadata backend.
+.TP
 \fB\-o\fR ensure_diskfree (default 0)
 sets MB to ensure disk free space. This option means the threshold of free space size on disk which is used for the cache file by s3fs.
 s3fs makes file for downloading, uploading and caching files.

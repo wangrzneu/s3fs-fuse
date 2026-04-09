@@ -19,6 +19,7 @@
  */
 
 #include <cstdio>
+#include <cstdint>
 #include <string>
 
 #include "metadata_backend_factory.h"
@@ -34,6 +35,9 @@ void test_empty_redis_uri_returns_null_backend()
     ASSERT_TRUE(backend != nullptr);
     ASSERT_FALSE(backend->Name().empty());
     ASSERT_STREQUALS("null", backend->Name().c_str());
+    ASSERT_EQUALS(uint64_t(0), backend->GetUsedBytes());
+    ASSERT_TRUE(backend->AddUsedBytesDelta(1234));
+    ASSERT_EQUALS(uint64_t(0), backend->GetUsedBytes());
 }
 
 void test_redis_uri_returns_null_or_redis_backend()
@@ -46,6 +50,16 @@ void test_redis_uri_returns_null_or_redis_backend()
     const std::string backend_name = backend->Name();
     ASSERT_FALSE(backend_name.empty());
     ASSERT_TRUE("null" == backend_name || "redis" == backend_name);
+
+    ASSERT_EQUALS(uint64_t(0), backend->GetUsedBytes());
+    ASSERT_TRUE(backend->AddUsedBytesDelta(1024));
+    if("redis" == backend_name){
+        ASSERT_EQUALS(uint64_t(1024), backend->GetUsedBytes());
+        ASSERT_TRUE(backend->AddUsedBytesDelta(-2048));
+        ASSERT_EQUALS(uint64_t(0), backend->GetUsedBytes());
+    }else{
+        ASSERT_EQUALS(uint64_t(0), backend->GetUsedBytes());
+    }
 }
 
 void test_invalid_redis_endpoint_still_returns_backend_object()

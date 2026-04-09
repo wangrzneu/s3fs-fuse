@@ -153,6 +153,10 @@ static fsblkcnt_t parse_bucket_size(std::string max_size);
 static bool is_cmd_exists(const std::string& command);
 static int print_umount_message(const std::string& mp, bool force) __attribute__ ((unused));
 static uint64_t get_used_bytes_for_capacity_policy();
+static int64_t calculate_used_bytes_delta(off_t before_size, off_t after_size);
+static bool add_used_bytes_delta_for_capacity_policy(int64_t delta, const char* path);
+static bool try_get_object_size_for_capacity(const char* path, off_t& size);
+static void apply_used_bytes_delta_from_entity(FdEntity* ent, off_t before_size, const char* path);
 
 //-------------------------------------------------------------------
 // fuse interface functions
@@ -1307,6 +1311,8 @@ static int s3fs_unlink(const char* _path)
     WTF8_ENCODE(path)
     std::string strPath = path;
     int         result;
+    off_t       old_size = 0;
+    const bool  has_old_size = try_get_object_size_for_capacity(strPath.c_str(), old_size);
 
     FUSE_CTX_INFO("[path=%s]", strPath.c_str());
 
@@ -1316,6 +1322,10 @@ static int s3fs_unlink(const char* _path)
 
     if(0 != (result = delete_request(strPath))){
         return result;
+    }
+
+    if(has_old_size){
+        add_used_bytes_delta_for_capacity_policy(calculate_used_bytes_delta(old_size, 0), strPath.c_str());
     }
 
     // remove file cache and stat cache
@@ -1543,6 +1553,7 @@ static int rename_object(const char* from, const char* to, bool update_ctime)
     int         result;
     headers_t   meta;
     struct stat stbuf;
+    off_t       dst_old_size = 0;
 
     S3FS_PRN_INFO1("[from=%s][to=%s]", from , to);
 
@@ -1557,6 +1568,7 @@ static int rename_object(const char* from, const char* to, bool update_ctime)
     if(0 != (result = get_object_attribute(from, &stbuf, &meta))){
         return result;
     }
+    try_get_object_size_for_capacity(to, dst_old_size);
 
     std::string strSourcePath        = (mount_prefix.empty() && 0 == strcmp("/", from)) ? "//" : from;
 
@@ -1618,6 +1630,7 @@ static int rename_object(const char* from, const char* to, bool update_ctime)
     if(0 != (result = put_headers(to, meta, true, /* use_st_size= */ false))){
         return result;
     }
+    add_used_bytes_delta_for_capacity_policy(calculate_used_bytes_delta(dst_old_size, std::max<off_t>(stbuf.st_size, 0)), to);
 
     // rename
     FdManager::get()->Rename(from, to);
@@ -1645,7 +1658,9 @@ static int rename_object(const char* from, const char* to, bool update_ctime)
 
 static int rename_object_nocopy(const char* from, const char* to, bool update_ctime)
 {
-    int result;
+    int   result;
+    off_t dst_old_size = 0;
+    off_t uploaded_size = 0;
 
     FUSE_CTX_INFO1("[from=%s][to=%s]", from , to);
 
@@ -1657,6 +1672,7 @@ static int rename_object_nocopy(const char* from, const char* to, bool update_ct
         // not permit removing "from" object parent dir.
         return result;
     }
+    try_get_object_size_for_capacity(to, dst_old_size);
 
     // open & load
     {   // scope for AutoFdEntity
@@ -1685,7 +1701,11 @@ static int rename_object_nocopy(const char* from, const char* to, bool update_ct
             S3FS_PRN_ERR("could not upload file(%s): result=%d", to, result);
             return result;
         }
+        if(!ent->GetSize(uploaded_size)){
+            uploaded_size = 0;
+        }
     }
+    add_used_bytes_delta_for_capacity_policy(calculate_used_bytes_delta(dst_old_size, std::max<off_t>(uploaded_size, 0)), to);
     FdManager::get()->Rename(from, to);
 
     // Remove file
@@ -1704,6 +1724,7 @@ static int rename_large_object(const char* from, const char* to)
     int         result;
     struct stat stbuf;
     headers_t   meta;
+    off_t       dst_old_size = 0;
 
     S3FS_PRN_INFO1("[from=%s][to=%s]", from , to);
 
@@ -1718,10 +1739,12 @@ static int rename_large_object(const char* from, const char* to)
     if(0 != (result = get_object_attribute(from, &stbuf, &meta, false))){
         return result;
     }
+    try_get_object_size_for_capacity(to, dst_old_size);
 
     if(0 != (result = multipart_put_head_request(from, to, stbuf.st_size, meta))){
         return result;
     }
+    add_used_bytes_delta_for_capacity_policy(calculate_used_bytes_delta(dst_old_size, std::max<off_t>(stbuf.st_size, 0)), to);
 
     // Rename cache file
     FdManager::get()->Rename(from, to);
@@ -2972,10 +2995,13 @@ static int s3fs_truncate(const char* _path, off_t size FUSE3_FILE_INFO_ARG)
         // The cause is unknown now, but it can be avoided by flushing the file.
         //
         if(0 == size){
+            off_t before_flush_size = 0;
+            ent->GetOriginalMetaSize(before_flush_size);
             if(0 != (result = ent->Flush(autoent.GetPseudoFd(), true))){
                 S3FS_PRN_ERR("could not upload file(%s): result=%d", path, result);
                 return result;
             }
+            apply_used_bytes_delta_from_entity(ent, before_flush_size, path);
             StatCache::getStatCacheData()->DelStat(path);
         }
 #endif
@@ -3000,10 +3026,13 @@ static int s3fs_truncate(const char* _path, off_t size FUSE3_FILE_INFO_ARG)
             S3FS_PRN_ERR("could not open file(%s): errno=%d", path, errno);
             return -EIO;
         }
+        off_t before_flush_size = 0;
+        ent->GetOriginalMetaSize(before_flush_size);
         if(0 != (result = ent->Flush(autoent.GetPseudoFd(), true))){
             S3FS_PRN_ERR("could not upload file(%s): result=%d", path, result);
             return result;
         }
+        apply_used_bytes_delta_from_entity(ent, before_flush_size, path);
         StatCache::getStatCacheData()->DelStat(path);
     }
 
@@ -3095,6 +3124,8 @@ static int s3fs_open(const char* _path, struct fuse_file_info* fi)
             return result;
         }
 
+        off_t before_flush_size = 0;
+        ent->GetOriginalMetaSize(before_flush_size);
         if(0 != (result = ent->RowFlush(autoent.GetPseudoFd(), path, true))){
             S3FS_PRN_ERR("could not upload file(%s): result=%d", path, result);
 
@@ -3102,6 +3133,7 @@ static int s3fs_open(const char* _path, struct fuse_file_info* fi)
             StatCache::getStatCacheData()->DelStat(path);
             return result;
         }
+        apply_used_bytes_delta_from_entity(ent, before_flush_size, path);
     }
     fi->fh = autoent.Detach();       // KEEP fdentity open;
 
@@ -3164,6 +3196,8 @@ static int s3fs_write(const char* _path, const char* buf, size_t size, off_t off
 
     if(max_dirty_data != -1 && ent->BytesModified() >= max_dirty_data){
         int flushres;
+        off_t before_flush_size = 0;
+        ent->GetOriginalMetaSize(before_flush_size);
         if(0 != (flushres = ent->RowFlush(static_cast<int>(fi->fh), path, true))){
             S3FS_PRN_ERR("could not upload file(%s): result=%d", path, flushres);
 
@@ -3171,6 +3205,7 @@ static int s3fs_write(const char* _path, const char* buf, size_t size, off_t off
             StatCache::getStatCacheData()->DelStat(path);
             return flushres;
         }
+        apply_used_bytes_delta_from_entity(ent, before_flush_size, path);
         // Punch a hole in the file to recover disk space.
         if(!ent->PunchHole()){
             S3FS_PRN_WARN("could not punching HOLEs to a cache file, but continue.");
@@ -3178,6 +3213,77 @@ static int s3fs_write(const char* _path, const char* buf, size_t size, off_t off
     }
 
     return static_cast<int>(res);
+}
+
+static int64_t calculate_used_bytes_delta(off_t before_size, off_t after_size)
+{
+    if(after_size >= before_size){
+        const uint64_t diff = static_cast<uint64_t>(after_size - before_size);
+        const uint64_t max_positive = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+        if(diff > max_positive){
+            return std::numeric_limits<int64_t>::max();
+        }
+        return static_cast<int64_t>(diff);
+    }
+
+    const uint64_t diff = static_cast<uint64_t>(before_size - after_size);
+    const uint64_t max_negative = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+    if(diff > max_negative){
+        return std::numeric_limits<int64_t>::min();
+    }
+    return -static_cast<int64_t>(diff);
+}
+
+static bool add_used_bytes_delta_for_capacity_policy(int64_t delta, const char* path)
+{
+    if(delta == 0 || capacity_mode != CapacityMode::Redis){
+        return true;
+    }
+
+    std::shared_ptr<MetadataBackend> metadata_backend = StatCache::getStatCacheData()->GetMetadataBackend();
+    if(!metadata_backend){
+        S3FS_PRN_WARN("metadata backend is null while applying used-bytes delta [path=%s][delta=%lld]", SAFESTRPTR(path), static_cast<long long>(delta));
+        return false;
+    }
+
+    if(!metadata_backend->AddUsedBytesDelta(delta)){
+        S3FS_PRN_WARN("failed to apply used-bytes delta to metadata backend [path=%s][backend=%s][delta=%lld]", SAFESTRPTR(path), metadata_backend->Name().c_str(), static_cast<long long>(delta));
+        return false;
+    }
+    return true;
+}
+
+static bool try_get_object_size_for_capacity(const char* path, off_t& size)
+{
+    struct stat stbuf = {};
+    size = 0;
+
+    if(!path){
+        return false;
+    }
+
+    if(0 != get_object_attribute(path, &stbuf, nullptr, false)){
+        return false;
+    }
+
+    size = std::max<off_t>(stbuf.st_size, 0);
+    return true;
+}
+
+static void apply_used_bytes_delta_from_entity(FdEntity* ent, off_t before_size, const char* path)
+{
+    if(!ent){
+        return;
+    }
+
+    off_t after_size = before_size;
+    if(!ent->GetOriginalMetaSize(after_size)){
+        S3FS_PRN_WARN("failed to read uploaded size from fd entity [path=%s]", SAFESTRPTR(path));
+        return;
+    }
+
+    const int64_t delta = calculate_used_bytes_delta(before_size, after_size);
+    add_used_bytes_delta_for_capacity_policy(delta, path);
 }
 
 static uint64_t get_used_bytes_for_capacity_policy()
@@ -3245,6 +3351,8 @@ static int s3fs_flush(const char* _path, struct fuse_file_info* fi)
     FdEntity*    ent;
     if(nullptr != (ent = autoent.GetExistFdEntity(path, static_cast<int>(fi->fh)))){
         bool is_new_file = ent->IsDirtyNewFile();
+        off_t before_flush_size = 0;
+        ent->GetOriginalMetaSize(before_flush_size);
 
         if(0 == (result = ent->Flush(static_cast<int>(fi->fh), false))){
             // [NOTE]
@@ -3257,6 +3365,9 @@ static int s3fs_flush(const char* _path, struct fuse_file_info* fi)
                 S3FS_PRN_ERR("could not upload pending data(meta, etc) for pseudo_fd(%llu) / path(%s) by result=%d, but continue...", (unsigned long long)(fi->fh), path, result);
                 return result;
             }
+        }
+        if(0 == result){
+            apply_used_bytes_delta_from_entity(ent, before_flush_size, path);
         }
 
         //
@@ -3297,8 +3408,13 @@ static int s3fs_fsync(const char* _path, int datasync, struct fuse_file_info* fi
     FdEntity*    ent;
     if(nullptr != (ent = autoent.GetExistFdEntity(path, static_cast<int>(fi->fh)))){
         bool is_new_file = ent->IsDirtyNewFile();
+        off_t before_flush_size = 0;
+        ent->GetOriginalMetaSize(before_flush_size);
 
         result = ent->Flush(static_cast<int>(fi->fh), false);
+        if(0 == result){
+            apply_used_bytes_delta_from_entity(ent, before_flush_size, path);
+        }
 
         if(0 != datasync){
             // [NOTE]
@@ -3351,10 +3467,13 @@ static int s3fs_release(const char* _path, struct fuse_file_info* fi)
         //
         int result;
         if(ent->IsModified()){
+            off_t before_flush_size = 0;
+            ent->GetOriginalMetaSize(before_flush_size);
             if(0 != (result = ent->Flush(static_cast<int>(fi->fh), false))){
                 S3FS_PRN_ERR("failed to upload file contents for pseudo_fd(%llu) / path(%s) by result(%d)", (unsigned long long)(fi->fh), path, result);
                 return result;
             }
+            apply_used_bytes_delta_from_entity(ent, before_flush_size, path);
         }
 
         // [NOTE]

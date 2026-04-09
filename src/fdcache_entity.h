@@ -205,6 +205,12 @@ class FdEntity : public std::enable_shared_from_this<FdEntity>
         }
 
         bool GetSize(off_t& size) const;
+        bool GetOriginalMetaSize(off_t& size) const
+        {
+            const std::lock_guard<std::mutex> lock(fdent_lock);
+            size = size_orgmeta;
+            return true;
+        }
         bool GetXattr(std::string& xattr) const;
         bool SetXattr(const std::string& xattr);
         bool SetMode(mode_t mode) {

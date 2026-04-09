@@ -59,6 +59,7 @@
 #include "s3fs_threadreqs.h"
 #include "mpu_util.h"
 #include "threadpoolman.h"
+#include "capacity_policy.h"
 
 //-------------------------------------------------------------------
 // Symbols
@@ -110,6 +111,8 @@ static off_t fake_diskfree_size   = -1; // default is not set(-1)
 static bool update_parent_dir_stat= false;  // default not updating parent directory stats
 static fsblkcnt_t bucket_block_count;                       // advertised block count of the bucket
 static unsigned long s3fs_block_size = 16 * 1024 * 1024;    // s3fs block size is 16MB
+static CapacityMode capacity_mode = CapacityMode::Legacy;
+static bool is_bucket_size_explicit = false;
 
 //-------------------------------------------------------------------
 // Static functions : prototype
@@ -145,6 +148,7 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
 static fsblkcnt_t parse_bucket_size(std::string max_size);
 static bool is_cmd_exists(const std::string& command);
 static int print_umount_message(const std::string& mp, bool force) __attribute__ ((unused));
+static uint64_t get_used_bytes_for_capacity_policy();
 
 //-------------------------------------------------------------------
 // fuse interface functions
@@ -3172,30 +3176,40 @@ static int s3fs_write(const char* _path, const char* buf, size_t size, off_t off
     return static_cast<int>(res);
 }
 
+static uint64_t get_used_bytes_for_capacity_policy()
+{
+    return 0;
+}
+
 static int s3fs_statfs(const char* _path, struct statvfs* stbuf)
 {
+    const uint64_t bucket_size_bytes = static_cast<uint64_t>(bucket_block_count) * static_cast<uint64_t>(s3fs_block_size);
+    const uint64_t used_bytes = get_used_bytes_for_capacity_policy();
+    const uint64_t effective_bucket_size_bytes = (CapacityMode::Redis == capacity_mode && !is_bucket_size_explicit) ? 0 : bucket_size_bytes;
+    const CapacityResult capacity = ComputeCapacity(capacity_mode, static_cast<uint64_t>(bucket_block_count), effective_bucket_size_bytes, used_bytes, static_cast<uint64_t>(s3fs_block_size));
+
     // WTF8_ENCODE(path)
     stbuf->f_bsize   = s3fs_block_size;
     stbuf->f_namemax = NAME_MAX;
 
 #ifdef __MSYS__
     // WinFsp resolves the free space from f_bfree * f_frsize, and the total space from f_blocks * f_frsize (in bytes).
-    stbuf->f_blocks = bucket_block_count;
+    stbuf->f_blocks = capacity.f_blocks;
     stbuf->f_frsize = stbuf->f_bsize;
-    stbuf->f_bfree  = stbuf->f_blocks;
+    stbuf->f_bfree  = capacity.f_bfree;
 #elif defined(__APPLE__)
-    stbuf->f_blocks = bucket_block_count;
+    stbuf->f_blocks = capacity.f_blocks;
     stbuf->f_frsize = stbuf->f_bsize;
-    stbuf->f_bfree  = stbuf->f_blocks;
+    stbuf->f_bfree  = capacity.f_bfree;
     stbuf->f_files  = UINT32_MAX;
     stbuf->f_ffree  = UINT32_MAX;
     stbuf->f_favail = UINT32_MAX;
 #else
     stbuf->f_frsize = stbuf->f_bsize;
-    stbuf->f_blocks = bucket_block_count;
-    stbuf->f_bfree  = stbuf->f_blocks;
+    stbuf->f_blocks = capacity.f_blocks;
+    stbuf->f_bfree  = capacity.f_bfree;
 #endif
-    stbuf->f_bavail = stbuf->f_blocks;
+    stbuf->f_bavail = capacity.f_bavail;
 
     return 0;
 }
@@ -5100,12 +5114,25 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
             is_s3fs_gid = true;
             return 1; // continue for fuse option
         }
+        else if(is_prefix(arg, "capacity_mode=")){
+            const char* mode = strchr(arg, '=') + sizeof(char);
+            if(0 == strcmp(mode, "legacy")){
+                capacity_mode = CapacityMode::Legacy;
+            }else if(0 == strcmp(mode, "redis")){
+                capacity_mode = CapacityMode::Redis;
+            }else{
+                S3FS_PRN_EXIT("invalid capacity_mode option.");
+                return -1;
+            }
+            return 0;
+        }
         else if(is_prefix(arg, "bucket_size=")){
             bucket_block_count = parse_bucket_size(strchr(arg, '=') + sizeof(char));
             if(0 == bucket_block_count){
                 S3FS_PRN_EXIT("invalid bucket_size option.");
                 return -1;
             }
+            is_bucket_size_explicit = true;
             return 0;
         }
         else if(is_prefix(arg, "umask=")){

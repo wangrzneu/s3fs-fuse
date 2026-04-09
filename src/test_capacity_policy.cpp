@@ -18,6 +18,8 @@ namespace {
 
 static constexpr uint64_t ONE_TIB = 1024ULL * 1024ULL * 1024ULL * 1024ULL;
 static constexpr uint64_t ONE_GIB = 1024ULL * 1024ULL * 1024ULL;
+static constexpr uint64_t TWO_TIB = 2ULL * ONE_TIB;
+static constexpr uint64_t THREE_TIB = 3ULL * ONE_TIB;
 static constexpr uint64_t BLOCK_SZ = 16ULL * 1024ULL * 1024ULL;
 
 void test_legacy_mode()
@@ -65,6 +67,17 @@ void test_redis_mode_saturation()
     ASSERT_EQUALS(uint64_t(0), result.f_bavail);
 }
 
+void test_redis_mode_saturation_at_two_tib()
+{
+    const CapacityResult result = ComputeCapacity(CapacityMode::Redis, 0, TWO_TIB, THREE_TIB, BLOCK_SZ);
+
+    ASSERT_EQUALS(TWO_TIB, result.total_bytes);
+    ASSERT_EQUALS(uint64_t(0), result.free_bytes);
+    ASSERT_EQUALS(TWO_TIB / BLOCK_SZ, result.f_blocks);
+    ASSERT_EQUALS(uint64_t(0), result.f_bfree);
+    ASSERT_EQUALS(uint64_t(0), result.f_bavail);
+}
+
 }
 
 int main(int argc, const char *argv[])
@@ -76,6 +89,7 @@ int main(int argc, const char *argv[])
     test_redis_mode_default_size();
     test_redis_mode_used_capacity();
     test_redis_mode_saturation();
+    test_redis_mode_saturation_at_two_tib();
     std::puts("test_capacity_policy: OK");
     return 0;
 }

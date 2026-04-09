@@ -51,14 +51,22 @@ public:
     {
         uint64_t current = used_bytes.load(std::memory_order_relaxed);
         while(true){
-            __int128 next = static_cast<__int128>(current) + static_cast<__int128>(delta);
-            if(next < 0){
-                next = 0;
-            }else if(next > static_cast<__int128>(std::numeric_limits<uint64_t>::max())){
-                next = static_cast<__int128>(std::numeric_limits<uint64_t>::max());
+            uint64_t updated;
+            if(delta >= 0){
+                const uint64_t addend = static_cast<uint64_t>(delta);
+                if(current > (std::numeric_limits<uint64_t>::max() - addend)){
+                    updated = std::numeric_limits<uint64_t>::max();
+                }else{
+                    updated = current + addend;
+                }
+            }else{
+                const uint64_t subtrahend = static_cast<uint64_t>(-(delta + 1)) + 1;
+                if(subtrahend > current){
+                    updated = 0;
+                }else{
+                    updated = current - subtrahend;
+                }
             }
-
-            uint64_t updated = static_cast<uint64_t>(next);
             if(used_bytes.compare_exchange_weak(current, updated, std::memory_order_relaxed, std::memory_order_relaxed)){
                 return true;
             }

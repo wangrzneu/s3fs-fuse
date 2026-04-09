@@ -48,6 +48,16 @@ void test_redis_uri_returns_null_or_redis_backend()
     ASSERT_TRUE("null" == backend_name || "redis" == backend_name);
 }
 
+void test_invalid_redis_endpoint_still_returns_backend_object()
+{
+    MetadataBackendConfig config;
+    config.redis_uri = "redis://bad-host:6379/0";
+    MetadataBackendPtr backend = CreateMetadataBackend(config);
+
+    ASSERT_TRUE(backend != nullptr);
+    ASSERT_FALSE(backend->Name().empty());
+}
+
 #ifdef HAVE_HIREDIS
 void test_factory_selects_redis_backend_when_hiredis_enabled()
 {
@@ -69,6 +79,7 @@ int main(int argc, const char *argv[])
 
     test_empty_redis_uri_returns_null_backend();
     test_redis_uri_returns_null_or_redis_backend();
+    test_invalid_redis_endpoint_still_returns_backend_object();
 #ifdef HAVE_HIREDIS
     test_factory_selects_redis_backend_when_hiredis_enabled();
 #endif

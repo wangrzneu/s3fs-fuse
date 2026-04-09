@@ -60,6 +60,7 @@
 #include "mpu_util.h"
 #include "threadpoolman.h"
 #include "capacity_policy.h"
+#include "metadata_backend_factory.h"
 
 //-------------------------------------------------------------------
 // Symbols
@@ -113,6 +114,9 @@ static fsblkcnt_t bucket_block_count;                       // advertised block 
 static unsigned long s3fs_block_size = 16 * 1024 * 1024;    // s3fs block size is 16MB
 static CapacityMode capacity_mode = CapacityMode::Legacy;
 static bool is_bucket_size_explicit = false;
+static std::string redis_meta_uri;
+static long redis_connect_timeout_ms = 100;
+static long redis_rw_timeout_ms = 100;
 
 //-------------------------------------------------------------------
 // Static functions : prototype
@@ -4458,6 +4462,16 @@ static void* s3fs_init(struct fuse_conn_info* conn)
         s3fs_exit_fuseloop(EXIT_FAILURE);
     }
 
+    MetadataBackendConfig metadata_backend_config;
+    metadata_backend_config.redis_uri = redis_meta_uri;
+    metadata_backend_config.connect_timeout_ms = redis_connect_timeout_ms;
+    metadata_backend_config.rw_timeout_ms = redis_rw_timeout_ms;
+    MetadataBackendPtr metadata_backend = CreateMetadataBackend(metadata_backend_config);
+    StatCache::getStatCacheData()->SetMetadataBackend(std::shared_ptr<MetadataBackend>(metadata_backend.release()));
+    if(auto selected_backend = StatCache::getStatCacheData()->GetMetadataBackend()){
+        S3FS_PRN_INFO("metadata backend mode: %s", selected_backend->Name().c_str());
+    }
+
     // check loading IAM role name
     if(!ps3fscred->LoadIAMRoleFromMetaData()){
         S3FS_PRN_CRIT("could not load IAM role name from meta data.");
@@ -5128,6 +5142,28 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
                 return -1;
             }
             is_bucket_size_explicit = true;
+            return 0;
+        }
+        else if(is_prefix(arg, "redis_meta=")){
+            redis_meta_uri = strchr(arg, '=') + sizeof(char);
+            return 0;
+        }
+        else if(is_prefix(arg, "redis_connect_timeout=")){
+            long timeout_ms = static_cast<long>(cvt_strtoofft(strchr(arg, '=') + sizeof(char), /*base=*/ 10));
+            if(timeout_ms < 0){
+                S3FS_PRN_EXIT("redis_connect_timeout option must be zero or positive.");
+                return -1;
+            }
+            redis_connect_timeout_ms = timeout_ms;
+            return 0;
+        }
+        else if(is_prefix(arg, "redis_readwrite_timeout=")){
+            long timeout_ms = static_cast<long>(cvt_strtoofft(strchr(arg, '=') + sizeof(char), /*base=*/ 10));
+            if(timeout_ms < 0){
+                S3FS_PRN_EXIT("redis_readwrite_timeout option must be zero or positive.");
+                return -1;
+            }
+            redis_rw_timeout_ms = timeout_ms;
             return 0;
         }
         else if(is_prefix(arg, "umask=")){

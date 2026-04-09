@@ -26,6 +26,7 @@
 
 #include "s3fs_logger.h"
 #include "cache.h"
+#include "metadata_backend.h"
 
 //-------------------------------------------------------------------
 // Static
@@ -36,7 +37,7 @@ std::mutex      StatCache::stat_cache_lock;
 //-------------------------------------------------------------------
 // Constructor/Destructor
 //-------------------------------------------------------------------
-StatCache::StatCache() : pMountPointDir(nullptr), CacheSize(100'000)
+StatCache::StatCache() : pMountPointDir(nullptr), pMetadataBackend(nullptr), CacheSize(100'000)
 {
     if(this == StatCache::getStatCacheData()){
         pMountPointDir = std::make_shared<DirStatCache>("/");
@@ -65,6 +66,18 @@ unsigned long StatCache::SetCacheSize(unsigned long size)
     unsigned long old = CacheSize;
     CacheSize = size;
     return old;
+}
+
+void StatCache::SetMetadataBackend(std::shared_ptr<MetadataBackend> backend)
+{
+    const std::lock_guard<std::mutex> lock(StatCache::stat_cache_lock);
+    pMetadataBackend = std::move(backend);
+}
+
+std::shared_ptr<MetadataBackend> StatCache::GetMetadataBackend()
+{
+    const std::lock_guard<std::mutex> lock(StatCache::stat_cache_lock);
+    return pMetadataBackend;
 }
 
 bool StatCache::GetStat(const std::string& key, struct stat* pstbuf, headers_t* pmeta, objtype_t* ptype, const char* petag)

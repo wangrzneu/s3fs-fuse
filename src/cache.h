@@ -21,6 +21,7 @@
 #ifndef S3FS_CACHE_H_
 #define S3FS_CACHE_H_
 
+#include <memory>
 #include <mutex>
 #include <string>
 #include <sys/stat.h>
@@ -29,6 +30,8 @@
 #include "metaheader.h"
 #include "s3objlist.h"
 #include "cache_node.h"
+
+class MetadataBackend;
 
 //-------------------------------------------------------------------
 // Class StatCache
@@ -49,6 +52,7 @@ class StatCache
         static std::mutex      stat_cache_lock;
 
         std::shared_ptr<DirStatCache> pMountPointDir GUARDED_BY(stat_cache_lock);   // Top directory = Mount point
+        std::shared_ptr<MetadataBackend> pMetadataBackend GUARDED_BY(stat_cache_lock);
         unsigned long                 CacheSize;
 
     private:
@@ -75,6 +79,8 @@ class StatCache
         // Attribute
         unsigned long GetCacheSize() const;
         unsigned long SetCacheSize(unsigned long size);
+        void SetMetadataBackend(std::shared_ptr<MetadataBackend> backend);
+        std::shared_ptr<MetadataBackend> GetMetadataBackend();
 
         // Get stat cache
         bool GetStat(const std::string& key, struct stat* pstbuf, headers_t* pmeta, objtype_t* ptype, const char* petag = nullptr);

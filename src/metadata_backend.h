@@ -21,6 +21,7 @@
 #ifndef S3FS_METADATA_BACKEND_H_
 #define S3FS_METADATA_BACKEND_H_
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -37,6 +38,8 @@ public:
     virtual ~MetadataBackend() = default;
 
     virtual std::string Name() const = 0;
+    virtual uint64_t GetUsedBytes() const = 0;
+    virtual bool AddUsedBytesDelta(int64_t delta) = 0;
 };
 
 using MetadataBackendPtr = std::unique_ptr<MetadataBackend>;

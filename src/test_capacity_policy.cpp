@@ -100,6 +100,13 @@ void test_redis_mode_saturation_at_two_tib()
     ASSERT_EQUALS(uint64_t(0), result.f_bavail);
 }
 
+void test_redis_mode_used_bytes_clamp_contract()
+{
+    const CapacityResult result = ComputeCapacity(CapacityMode::Redis, 0, (1ULL << 40), (2ULL << 40), BLOCK_SZ);
+
+    ASSERT_EQUALS(uint64_t(0), result.free_bytes);
+}
+
 }
 
 int main(int argc, const char *argv[])
@@ -114,6 +121,7 @@ int main(int argc, const char *argv[])
     test_redis_mode_used_capacity();
     test_redis_mode_saturation();
     test_redis_mode_saturation_at_two_tib();
+    test_redis_mode_used_bytes_clamp_contract();
     std::puts("test_capacity_policy: OK");
     return 0;
 }

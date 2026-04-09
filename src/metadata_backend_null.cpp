@@ -31,6 +31,17 @@ public:
     {
         return "null";
     }
+
+    uint64_t GetUsedBytes() const override
+    {
+        return 0;
+    }
+
+    bool AddUsedBytesDelta(int64_t delta) override
+    {
+        (void)delta;
+        return true;
+    }
 };
 
 } // namespace

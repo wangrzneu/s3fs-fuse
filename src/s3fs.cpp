@@ -3182,7 +3182,11 @@ static int s3fs_write(const char* _path, const char* buf, size_t size, off_t off
 
 static uint64_t get_used_bytes_for_capacity_policy()
 {
-    return 0;
+    std::shared_ptr<MetadataBackend> metadata_backend = StatCache::getStatCacheData()->GetMetadataBackend();
+    if(!metadata_backend){
+        return 0;
+    }
+    return metadata_backend->GetUsedBytes();
 }
 
 static int s3fs_statfs(const char* _path, struct statvfs* stbuf)

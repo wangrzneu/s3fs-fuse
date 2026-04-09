@@ -20,6 +20,10 @@
 
 #include "metadata_backend.h"
 
+#include <atomic>
+#include <cstdint>
+#include <limits>
+
 #ifdef HAVE_HIREDIS
 #include <hiredis/hiredis.h>
 #endif
@@ -29,10 +33,40 @@ namespace {
 class RedisMetadataBackend final : public MetadataBackend
 {
 public:
+    RedisMetadataBackend() : used_bytes(0)
+    {
+    }
+
     std::string Name() const override
     {
         return "redis";
     }
+
+    uint64_t GetUsedBytes() const override
+    {
+        return used_bytes.load(std::memory_order_relaxed);
+    }
+
+    bool AddUsedBytesDelta(int64_t delta) override
+    {
+        uint64_t current = used_bytes.load(std::memory_order_relaxed);
+        while(true){
+            __int128 next = static_cast<__int128>(current) + static_cast<__int128>(delta);
+            if(next < 0){
+                next = 0;
+            }else if(next > static_cast<__int128>(std::numeric_limits<uint64_t>::max())){
+                next = static_cast<__int128>(std::numeric_limits<uint64_t>::max());
+            }
+
+            uint64_t updated = static_cast<uint64_t>(next);
+            if(used_bytes.compare_exchange_weak(current, updated, std::memory_order_relaxed, std::memory_order_relaxed)){
+                return true;
+            }
+        }
+    }
+
+private:
+    std::atomic<uint64_t> used_bytes;
 };
 
 #ifdef HAVE_HIREDIS

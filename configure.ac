@@ -19,7 +19,7 @@
 ######################################################################
 dnl Process this file with autoconf to produce a configure script.
 
-AC_PREREQ([2.72])
+AC_PREREQ([2.69])
 AC_INIT([s3fs],[1.97])
 AC_CONFIG_HEADERS([config.h])
 
@@ -71,6 +71,44 @@ PKG_CHECK_MODULES([FUSE_T], [fuse-t >= ${min_fuse_t_version}], [found_fuse_t=yes
 AS_IF([test "$found_fuse_t" = "yes"],
   [PKG_CHECK_MODULES([fuse_library_checking], [fuse-t >= ${min_fuse_t_version}])],
   [PKG_CHECK_MODULES([fuse_library_checking], [fuse3 >= ${min_fuse_version}])])
+
+dnl ----------------------------------------------
+dnl Checking libfuse capability requirements
+dnl ----------------------------------------------
+dnl On Linux, IDMAP support is optional and can be enforced via
+dnl --enable-require-fuse-idmap when needed.
+require_fuse_idmap=no
+AC_ARG_ENABLE(
+  [require-fuse-idmap],
+  [AS_HELP_STRING([--enable-require-fuse-idmap], [fail configure if libfuse does not provide FUSE_CAP_ALLOW_IDMAP and fuse_conn_info.want_ext (default: no)])],
+  [require_fuse_idmap="$enableval"],
+  [require_fuse_idmap=no]
+)
+
+case "$target" in
+   *-linux* )
+      saved_CPPFLAGS="$CPPFLAGS"
+      CPPFLAGS="$CPPFLAGS $fuse_library_checking_CFLAGS"
+
+      AC_MSG_CHECKING([whether libfuse provides optional IDMAP capability interfaces])
+      AC_COMPILE_IFELSE(
+        [AC_LANG_PROGRAM([[#include <fuse_common.h>]],
+                         [[struct fuse_conn_info conn;
+                           conn.want_ext |= FUSE_CAP_ALLOW_IDMAP;]])
+        ],
+        [AC_DEFINE([HAVE_LIBFUSE_IDMAP_EXT], [1], [Define to 1 if libfuse supports FUSE_CAP_ALLOW_IDMAP via fuse_conn_info.want_ext.])
+         AC_MSG_RESULT(yes)
+        ],
+        [AC_MSG_RESULT(no)
+         AS_IF(
+           [test "x$require_fuse_idmap" = "xyes"],
+           [AC_MSG_ERROR([--enable-require-fuse-idmap was set, but libfuse is missing FUSE_CAP_ALLOW_IDMAP and/or fuse_conn_info.want_ext. Please install libfuse from https://github.com/libfuse/libfuse/tree/master])],
+           [AC_MSG_WARN([libfuse IDMAP capability not found; building without IDMAP support])])
+        ])
+
+      CPPFLAGS="$saved_CPPFLAGS"
+      ;;
+esac
 
 dnl ----------------------------------------------
 dnl Choice SSL library

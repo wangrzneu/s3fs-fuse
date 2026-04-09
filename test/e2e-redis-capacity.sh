@@ -113,6 +113,59 @@ assert_ge() {
   (( lhs >= rhs )) || fail "${message}: lhs=${lhs}, rhs=${rhs}"
 }
 
+assert_gt() {
+  local lhs="$1"
+  local rhs="$2"
+  local message="$3"
+  (( lhs > rhs )) || fail "${message}: lhs=${lhs}, rhs=${rhs}"
+}
+
+assert_le() {
+  local lhs="$1"
+  local rhs="$2"
+  local message="$3"
+  (( lhs <= rhs )) || fail "${message}: lhs=${lhs}, rhs=${rhs}"
+}
+
+read_redis_used_bytes() {
+  local key="$1"
+  local value
+  value="$(redis-cli --raw GET "$key" 2>/dev/null || true)"
+  if [[ -z "$value" ]]; then
+    value=0
+  fi
+  printf '%s' "$value"
+}
+
+assert_redis_write_path_counter() {
+  local mp="$1"
+  local key="$2"
+
+  run redis-cli DEL "$key"
+  local baseline
+  baseline="$(read_redis_used_bytes "$key")"
+
+  run dd if=/dev/zero of="$mp/e2e-counter.bin" bs=1M count=4 status=none
+  sleep 2
+  local after_write
+  after_write="$(read_redis_used_bytes "$key")"
+  assert_gt "$after_write" "$baseline" "redis used-bytes should increase after write"
+
+  run truncate -s 1M "$mp/e2e-counter.bin"
+  sleep 2
+  local after_truncate
+  after_truncate="$(read_redis_used_bytes "$key")"
+  assert_le "$after_truncate" "$after_write" "redis used-bytes should not increase after truncate shrink"
+
+  run rm -f "$mp/e2e-counter.bin"
+  sleep 2
+  local after_delete
+  after_delete="$(read_redis_used_bytes "$key")"
+  assert_eq "$baseline" "$after_delete" "redis used-bytes should return to baseline after delete"
+
+  log "redis counter bytes: baseline=${baseline} after_write=${after_write} after_truncate=${after_truncate} after_delete=${after_delete}"
+}
+
 assert_basic_io() {
   local mp="$1"
   run mkdir -p "$mp/e2e-dir"
@@ -163,6 +216,7 @@ mount_and_validate_redis_default() {
   log "redis(default) mounted pid=$pid"
 
   assert_basic_io "$mp"
+  assert_redis_write_path_counter "$mp" "s3fs:capacity:used_bytes:${BUCKET}"
 
   read -r size used avail <<<"$(read_df_size_used_avail "$mp")"
   log "redis(default) df bytes: size=${size} used=${used} avail=${avail}"
@@ -188,6 +242,7 @@ mount_and_validate_redis_explicit() {
   log "redis(explicit) mounted pid=$pid"
 
   assert_basic_io "$mp"
+  assert_redis_write_path_counter "$mp" "s3fs:capacity:used_bytes:${BUCKET}"
 
   read -r size used avail <<<"$(read_df_size_used_avail "$mp")"
   log "redis(explicit) df bytes: size=${size} used=${used} avail=${avail}"
@@ -204,6 +259,9 @@ main() {
   need_cmd mountpoint
   need_cmd df
   need_cmd awk
+  if [[ "$RUN_REDIS_DEFAULT" == "1" || "$RUN_REDIS_EXPLICIT" == "1" ]]; then
+    need_cmd redis-cli
+  fi
 
   [[ -n "$BUCKET" ]] || fail "BUCKET is required"
   [[ -n "$PASSWD_FILE" ]] || fail "PASSWD_FILE is required"
@@ -230,7 +288,6 @@ main() {
   fi
 
   log "E2E completed"
-  log "Note: current implementation reads used bytes from backend, but write-path counter updates are not fully wired yet."
 }
 
 main "$@"

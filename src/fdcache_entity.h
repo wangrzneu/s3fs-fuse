@@ -21,6 +21,7 @@
 #ifndef S3FS_FDCACHE_ENTITY_H_
 #define S3FS_FDCACHE_ENTITY_H_
 
+#include <algorithm>
 #include <cstdint>
 #include <fcntl.h>
 #include <memory>
@@ -69,6 +70,8 @@ class FdEntity : public std::enable_shared_from_this<FdEntity>
         ino_t              inode           GUARDED_BY(fdent_lock);       // inode number for cache file
         headers_t          orgmeta         GUARDED_BY(fdent_lock);       // original headers at opening
         off_t              size_orgmeta    GUARDED_BY(fdent_lock);       // original file size in original headers
+        bool               has_capacity_base_size GUARDED_BY(fdent_lock); // whether capacity delta base size override is set
+        off_t              capacity_base_size GUARDED_BY(fdent_lock);     // original uploaded size before truncate-style rewrites
 
         mutable std::mutex fdent_data_lock ACQUIRED_AFTER(fdent_lock);   // protects the following members
         PageList           pagelist       GUARDED_BY(fdent_data_lock);
@@ -210,6 +213,27 @@ class FdEntity : public std::enable_shared_from_this<FdEntity>
             const std::lock_guard<std::mutex> lock(fdent_lock);
             size = size_orgmeta;
             return true;
+        }
+        void SetCapacityBaseSize(off_t size)
+        {
+            const std::lock_guard<std::mutex> lock(fdent_lock);
+            has_capacity_base_size = true;
+            capacity_base_size = std::max<off_t>(size, 0);
+        }
+        bool GetCapacityBaseSize(off_t& size) const
+        {
+            const std::lock_guard<std::mutex> lock(fdent_lock);
+            if(!has_capacity_base_size){
+                return false;
+            }
+            size = capacity_base_size;
+            return true;
+        }
+        void ClearCapacityBaseSize()
+        {
+            const std::lock_guard<std::mutex> lock(fdent_lock);
+            has_capacity_base_size = false;
+            capacity_base_size = 0;
         }
         bool GetXattr(std::string& xattr) const;
         bool SetXattr(const std::string& xattr);

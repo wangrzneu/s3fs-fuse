@@ -59,6 +59,7 @@ s3fs_SOURCES = \
     threadpoolman.cpp \
     syncfiller.cpp \
     common_auth.cpp \
+    capacity_policy.cpp \
     metadata_backend_factory.cpp \
     metadata_backend_null.cpp \
     metadata_backend_redis.cpp

@@ -28,6 +28,7 @@
 struct MetadataBackendConfig
 {
     std::string redis_uri;
+    std::string used_bytes_key;
     long connect_timeout_ms = 100;
     long rw_timeout_ms = 100;
 };

@@ -2956,6 +2956,7 @@ static int s3fs_truncate(const char* _path, off_t size FUSE3_FILE_INFO_ARG)
     // Get file information
     if(0 == (result = get_object_attribute(path, nullptr, &meta))){
         // File exists
+        const off_t truncate_base_size = std::max<off_t>(get_size(meta), 0);
 
         // [NOTE]
         // If the file exists, the file has already been opened by FUSE before
@@ -2987,6 +2988,9 @@ static int s3fs_truncate(const char* _path, off_t size FUSE3_FILE_INFO_ARG)
         if(nullptr == (ent = autoent.Open(path, &meta, size, ts_times, O_RDWR, false, true, ignore_modify))){
             S3FS_PRN_ERR("could not open file(%s): errno=%d(ent is null(%p))", path, errno, ent);   // [NOTE] read ent to avoid errors with cppcheck etc
             return -EIO;
+        }
+        if(capacity_mode == CapacityMode::Redis && truncate_base_size != size){
+            ent->SetCapacityBaseSize(truncate_base_size);
         }
 
 #ifdef __APPLE__
@@ -3045,6 +3049,7 @@ static int s3fs_open(const char* _path, struct fuse_file_info* fi)
     int result;
     struct stat st;
     bool needs_flush = false;
+    off_t truncate_base_size = 0;
 
     FUSE_CTX_INFO("[path=%s][flags=0x%x]", path, fi->flags);
 
@@ -3085,6 +3090,7 @@ static int s3fs_open(const char* _path, struct fuse_file_info* fi)
 
     if(static_cast<unsigned int>(fi->flags) & O_TRUNC){
         if(0 != st.st_size){
+            truncate_base_size = std::max<off_t>(st.st_size, 0);
             st.st_size = 0;
             needs_flush = true;
         }
@@ -3114,6 +3120,9 @@ static int s3fs_open(const char* _path, struct fuse_file_info* fi)
         // remove stat cache
         StatCache::getStatCacheData()->DelStat(path);
         return -EIO;
+    }
+    if(capacity_mode == CapacityMode::Redis && needs_flush && truncate_base_size > 0){
+        ent->SetCapacityBaseSize(truncate_base_size);
     }
 
     if (needs_flush){
@@ -3276,14 +3285,22 @@ static void apply_used_bytes_delta_from_entity(FdEntity* ent, off_t before_size,
         return;
     }
 
-    off_t after_size = before_size;
+    off_t before_size_for_delta = before_size;
+    off_t capacity_base_size = 0;
+    if(ent->GetCapacityBaseSize(capacity_base_size)){
+        before_size_for_delta = capacity_base_size;
+    }
+
+    off_t after_size = before_size_for_delta;
     if(!ent->GetOriginalMetaSize(after_size)){
         S3FS_PRN_WARN("failed to read uploaded size from fd entity [path=%s]", SAFESTRPTR(path));
         return;
     }
 
-    const int64_t delta = calculate_used_bytes_delta(before_size, after_size);
-    add_used_bytes_delta_for_capacity_policy(delta, path);
+    const int64_t delta = calculate_used_bytes_delta(before_size_for_delta, after_size);
+    if(add_used_bytes_delta_for_capacity_policy(delta, path)){
+        ent->ClearCapacityBaseSize();
+    }
 }
 
 static uint64_t get_used_bytes_for_capacity_policy()
@@ -4587,6 +4604,13 @@ static void* s3fs_init(struct fuse_conn_info* conn)
 
     MetadataBackendConfig metadata_backend_config;
     metadata_backend_config.redis_uri = redis_meta_uri;
+    metadata_backend_config.used_bytes_key = "s3fs:capacity:used_bytes:" + S3fsCred::GetBucket();
+    if(!mount_prefix.empty()){
+        metadata_backend_config.used_bytes_key += ":" + mount_prefix;
+    }
+    if(!instance_name.empty()){
+        metadata_backend_config.used_bytes_key += ":" + instance_name;
+    }
     metadata_backend_config.connect_timeout_ms = redis_connect_timeout_ms;
     metadata_backend_config.rw_timeout_ms = redis_rw_timeout_ms;
     MetadataBackendPtr metadata_backend = CreateMetadataBackend(metadata_backend_config);
@@ -4617,7 +4641,7 @@ static void* s3fs_init(struct fuse_conn_info* conn)
          conn->want |= FUSE_CAP_ATOMIC_O_TRUNC;
     }
     #endif
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= 30 && defined(HAVE_LIBFUSE_IDMAP_EXT)
     // enable ID MAP
     conn->want_ext |= FUSE_CAP_ALLOW_IDMAP;
 #endif

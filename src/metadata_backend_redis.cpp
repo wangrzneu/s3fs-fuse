@@ -18,19 +18,35 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-#include "metadata_backend_factory.h"
+#include "metadata_backend.h"
 
-MetadataBackendPtr CreateRedisMetadataBackend(const MetadataBackendConfig& config);
+#ifdef HAVE_HIREDIS
+#include <hiredis/hiredis.h>
+#endif
 
-MetadataBackendPtr CreateMetadataBackend(const MetadataBackendConfig& config)
+namespace {
+
+class RedisMetadataBackend final : public MetadataBackend
 {
-    if(!config.redis_uri.empty()){
-        if(auto redis_backend = CreateRedisMetadataBackend(config)){
-            return redis_backend;
-        }
+public:
+    std::string Name() const override
+    {
+        return "redis";
     }
+};
 
-    return CreateNullMetadataBackend();
+} // namespace
+
+MetadataBackendPtr CreateRedisMetadataBackend(const MetadataBackendConfig& config)
+{
+    (void)config;
+
+#ifdef HAVE_HIREDIS
+    (void)sizeof(redisContext);
+    return std::make_unique<RedisMetadataBackend>();
+#else
+    return nullptr;
+#endif
 }
 
 /*

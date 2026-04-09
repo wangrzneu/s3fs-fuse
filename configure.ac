@@ -269,6 +269,31 @@ AM_CONDITIONAL([USE_GNUTLS_NETTLE], [test "$auth_lib" = nettle])
 AM_CONDITIONAL([USE_SSL_NSS], [test "$auth_lib" = nss])
 
 dnl ----------------------------------------------
+dnl optional hiredis support
+dnl ----------------------------------------------
+with_hiredis=auto
+have_hiredis=no
+
+AC_ARG_WITH(
+  hiredis,
+  [AS_HELP_STRING([--with-hiredis], [build redis metadata backend with hiredis(default is auto)])],
+  [with_hiredis="${withval}"],
+  [with_hiredis=auto])
+
+AS_IF(
+  [test "x$with_hiredis" != "xno"],
+  [PKG_CHECK_MODULES(
+     [HIREDIS],
+     [hiredis >= 1.0.0],
+     [
+       AC_DEFINE([HAVE_HIREDIS], [1], [Define to 1 if hiredis is available])
+       have_hiredis=yes
+     ],
+     [AS_IF([test "x$with_hiredis" = "xyes"], [AC_MSG_ERROR([hiredis requested but not found])])])])
+
+AM_CONDITIONAL([USE_HIREDIS], [test "x$have_hiredis" = "xyes"])
+
+dnl ----------------------------------------------
 dnl check functions
 dnl ----------------------------------------------
 dnl malloc_trim function

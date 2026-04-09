@@ -24,6 +24,8 @@
 #include "metadata_backend_factory.h"
 #include "test_util.h"
 
+MetadataBackendPtr CreateRedisMetadataBackend(const MetadataBackendConfig& config);
+
 namespace {
 
 void test_empty_redis_uri_returns_null_backend()
@@ -36,16 +38,29 @@ void test_empty_redis_uri_returns_null_backend()
     ASSERT_STREQUALS("null", backend->Name().c_str());
 }
 
-void test_redis_uri_still_returns_null_backend()
+void test_redis_uri_returns_null_or_redis_backend()
 {
     MetadataBackendConfig config;
     config.redis_uri = "redis://127.0.0.1:6379/0";
     MetadataBackendPtr backend = CreateMetadataBackend(config);
 
     ASSERT_TRUE(backend != nullptr);
-    ASSERT_FALSE(backend->Name().empty());
-    ASSERT_STREQUALS("null", backend->Name().c_str());
+    const std::string backend_name = backend->Name();
+    ASSERT_FALSE(backend_name.empty());
+    ASSERT_TRUE("null" == backend_name || "redis" == backend_name);
 }
+
+#ifdef HAVE_HIREDIS
+void test_direct_redis_backend_creation_returns_redis()
+{
+    MetadataBackendConfig config;
+    config.redis_uri = "redis://127.0.0.1:6379/0";
+    MetadataBackendPtr backend = CreateRedisMetadataBackend(config);
+
+    ASSERT_TRUE(backend != nullptr);
+    ASSERT_STREQUALS("redis", backend->Name().c_str());
+}
+#endif
 
 } // namespace
 
@@ -55,7 +70,10 @@ int main(int argc, const char *argv[])
     (void)argv;
 
     test_empty_redis_uri_returns_null_backend();
-    test_redis_uri_still_returns_null_backend();
+    test_redis_uri_returns_null_or_redis_backend();
+#ifdef HAVE_HIREDIS
+    test_direct_redis_backend_creation_returns_redis();
+#endif
     std::puts("test_metadata_backend_factory: OK");
     return 0;
 }

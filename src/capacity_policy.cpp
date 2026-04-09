@@ -11,6 +11,8 @@
 
 #include "capacity_policy.h"
 
+#include <cstring>
+
 namespace {
 
 static constexpr uint64_t REDIS_DEFAULT_BUCKET_SIZE_BYTES = 1024ULL * 1024ULL * 1024ULL * 1024ULL;
@@ -25,6 +27,34 @@ uint64_t bytes_to_blocks(uint64_t bytes, uint64_t block_size)
     return bytes / normalize_block_size(block_size);
 }
 
+}
+
+bool ParseCapacityMode(const char* value, CapacityMode& out_mode)
+{
+    if(nullptr == value){
+        return false;
+    }
+
+    if(0 == strcmp(value, "legacy")){
+        out_mode = CapacityMode::Legacy;
+        return true;
+    }
+
+    if(0 == strcmp(value, "redis")){
+        out_mode = CapacityMode::Redis;
+        return true;
+    }
+
+    return false;
+}
+
+uint64_t ComputeEffectiveBucketSizeBytes(CapacityMode mode, bool is_bucket_size_explicit, uint64_t bucket_blocks, uint64_t block_size)
+{
+    if(CapacityMode::Redis == mode && !is_bucket_size_explicit){
+        return 0;
+    }
+
+    return bucket_blocks * block_size;
 }
 
 CapacityResult ComputeCapacity(CapacityMode mode, uint64_t bucket_blocks, uint64_t bucket_size_bytes, uint64_t used_bytes, uint64_t block_size)

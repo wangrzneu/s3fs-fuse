@@ -3183,10 +3183,9 @@ static uint64_t get_used_bytes_for_capacity_policy()
 
 static int s3fs_statfs(const char* _path, struct statvfs* stbuf)
 {
-    const uint64_t bucket_size_bytes = static_cast<uint64_t>(bucket_block_count) * static_cast<uint64_t>(s3fs_block_size);
+    const uint64_t bucket_size_bytes = ComputeEffectiveBucketSizeBytes(capacity_mode, is_bucket_size_explicit, static_cast<uint64_t>(bucket_block_count), static_cast<uint64_t>(s3fs_block_size));
     const uint64_t used_bytes = get_used_bytes_for_capacity_policy();
-    const uint64_t effective_bucket_size_bytes = (CapacityMode::Redis == capacity_mode && !is_bucket_size_explicit) ? 0 : bucket_size_bytes;
-    const CapacityResult capacity = ComputeCapacity(capacity_mode, static_cast<uint64_t>(bucket_block_count), effective_bucket_size_bytes, used_bytes, static_cast<uint64_t>(s3fs_block_size));
+    const CapacityResult capacity = ComputeCapacity(capacity_mode, static_cast<uint64_t>(bucket_block_count), bucket_size_bytes, used_bytes, static_cast<uint64_t>(s3fs_block_size));
 
     // WTF8_ENCODE(path)
     stbuf->f_bsize   = s3fs_block_size;
@@ -5116,11 +5115,7 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
         }
         else if(is_prefix(arg, "capacity_mode=")){
             const char* mode = strchr(arg, '=') + sizeof(char);
-            if(0 == strcmp(mode, "legacy")){
-                capacity_mode = CapacityMode::Legacy;
-            }else if(0 == strcmp(mode, "redis")){
-                capacity_mode = CapacityMode::Redis;
-            }else{
+            if(!ParseCapacityMode(mode, capacity_mode)){
                 S3FS_PRN_EXIT("invalid capacity_mode option.");
                 return -1;
             }

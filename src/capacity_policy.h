@@ -28,6 +28,8 @@ struct CapacityResult
     uint64_t free_bytes;
 };
 
+bool ParseCapacityMode(const char* value, CapacityMode& out_mode);
+uint64_t ComputeEffectiveBucketSizeBytes(CapacityMode mode, bool is_bucket_size_explicit, uint64_t bucket_blocks, uint64_t block_size);
 CapacityResult ComputeCapacity(CapacityMode mode, uint64_t bucket_blocks, uint64_t bucket_size_bytes, uint64_t used_bytes, uint64_t block_size);
 
 #endif // S3FS_CAPACITY_POLICY_H_

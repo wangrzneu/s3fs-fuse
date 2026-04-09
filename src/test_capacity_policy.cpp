@@ -22,6 +22,28 @@ static constexpr uint64_t TWO_TIB = 2ULL * ONE_TIB;
 static constexpr uint64_t THREE_TIB = 3ULL * ONE_TIB;
 static constexpr uint64_t BLOCK_SZ = 16ULL * 1024ULL * 1024ULL;
 
+void test_parse_capacity_mode()
+{
+    CapacityMode mode = CapacityMode::Legacy;
+
+    ASSERT_TRUE(ParseCapacityMode("legacy", mode));
+    ASSERT_EQUALS(static_cast<int>(CapacityMode::Legacy), static_cast<int>(mode));
+
+    ASSERT_TRUE(ParseCapacityMode("redis", mode));
+    ASSERT_EQUALS(static_cast<int>(CapacityMode::Redis), static_cast<int>(mode));
+
+    ASSERT_FALSE(ParseCapacityMode("bad", mode));
+    ASSERT_EQUALS(static_cast<int>(CapacityMode::Redis), static_cast<int>(mode));
+}
+
+void test_effective_bucket_size_bytes()
+{
+    const uint64_t bucket_blocks = 7;
+
+    ASSERT_EQUALS(bucket_blocks * BLOCK_SZ, ComputeEffectiveBucketSizeBytes(CapacityMode::Legacy, false, bucket_blocks, BLOCK_SZ));
+    ASSERT_EQUALS(uint64_t(0), ComputeEffectiveBucketSizeBytes(CapacityMode::Redis, false, bucket_blocks, BLOCK_SZ));
+}
+
 void test_legacy_mode()
 {
     const uint64_t bucket_blocks = 12345;
@@ -85,6 +107,8 @@ int main(int argc, const char *argv[])
     (void)argc;
     (void)argv;
 
+    test_parse_capacity_mode();
+    test_effective_bucket_size_bytes();
     test_legacy_mode();
     test_redis_mode_default_size();
     test_redis_mode_used_capacity();

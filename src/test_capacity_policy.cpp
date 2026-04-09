@@ -54,6 +54,17 @@ void test_redis_mode_used_capacity()
     ASSERT_EQUALS(result.f_bfree, result.f_bavail);
 }
 
+void test_redis_mode_saturation()
+{
+    const CapacityResult result = ComputeCapacity(CapacityMode::Redis, 0, ONE_TIB, ONE_TIB + ONE_GIB, BLOCK_SZ);
+
+    ASSERT_EQUALS(ONE_TIB, result.total_bytes);
+    ASSERT_EQUALS(uint64_t(0), result.free_bytes);
+    ASSERT_EQUALS(ONE_TIB / BLOCK_SZ, result.f_blocks);
+    ASSERT_EQUALS(uint64_t(0), result.f_bfree);
+    ASSERT_EQUALS(uint64_t(0), result.f_bavail);
+}
+
 }
 
 int main(int argc, const char *argv[])
@@ -64,5 +75,7 @@ int main(int argc, const char *argv[])
     test_legacy_mode();
     test_redis_mode_default_size();
     test_redis_mode_used_capacity();
+    test_redis_mode_saturation();
+    std::puts("test_capacity_policy: OK");
     return 0;
 }

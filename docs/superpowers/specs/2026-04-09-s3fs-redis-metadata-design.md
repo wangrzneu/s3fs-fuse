@@ -122,11 +122,12 @@ TTL 策略：
 1. `legacy`（默认）:
    保持现有行为（`f_blocks = bucket_block_count`，`f_bfree = f_blocks`）。
 2. `redis`:
-   `f_blocks = quota_bytes / f_bsize`
-   `f_bfree = max(quota_bytes - used_bytes, 0) / f_bsize`
+   `f_blocks = bucket_size_bytes / f_bsize`
+   `f_bfree = max(bucket_size_bytes - used_bytes, 0) / f_bsize`
    `f_bavail = f_bfree`
 
-新增 `-o capacity_quota=`（仅 `capacity_mode=redis` 生效）。
+`capacity_mode=redis` 下仍使用 `-o bucket_size` 作为总配额来源。
+若未显式设置 `bucket_size`，默认值设为 `1T`。
 
 ### 5.2 `used_bytes` 更新策略
 
@@ -179,13 +180,13 @@ TTL 策略：
 6. `redis_dirlist_ttl=`
 7. `redis_negative_ttl=`
 8. `capacity_mode=legacy|redis`
-9. `capacity_quota=`
-10. `capacity_reconcile_interval=`
+9. `capacity_reconcile_interval=`
 
 兼容性约束：
 
 1. 不配置 `redis_meta` 时，所有新逻辑旁路。
 2. Redis 不可用时自动降级为 L1 + 回源，不影响挂载可用性。
+3. `capacity_mode=redis` 且未显式配置 `bucket_size` 时，按 `1T` 处理。
 
 ## 8. 构建与依赖改造
 

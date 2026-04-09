@@ -55,7 +55,9 @@ s3fs_SOURCES = \
     sighandlers.cpp \
     threadpoolman.cpp \
     syncfiller.cpp \
-    common_auth.cpp
+    common_auth.cpp \
+    metadata_backend_factory.cpp \
+    metadata_backend_null.cpp
 if USE_SSL_OPENSSL
     s3fs_SOURCES += openssl_auth.cpp
 endif
@@ -72,7 +74,8 @@ noinst_PROGRAMS = \
     test_curl_util \
     test_capacity_policy \
     test_page_list \
-    test_string_util
+    test_string_util \
+    test_metadata_backend_factory
 
 test_capacity_policy_SOURCES = capacity_policy.cpp test_capacity_policy.cpp
 
@@ -98,11 +101,14 @@ test_page_list_SOURCES = \
 
 test_string_util_SOURCES = string_util.cpp test_string_util.cpp s3fs_logger.cpp
 
+test_metadata_backend_factory_SOURCES = metadata_backend_factory.cpp metadata_backend_null.cpp test_metadata_backend_factory.cpp
+
 TESTS = \
     test_capacity_policy \
     test_curl_util \
     test_page_list \
-    test_string_util
+    test_string_util \
+    test_metadata_backend_factory
 
 clang-tidy:
 	clang-tidy -extra-arg-before=-xc++ -extra-arg=-std=@CPP_VERSION@ -header-filter= \

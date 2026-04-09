@@ -20,7 +20,7 @@
 
 #include <string>
 
-#include "metadata_backend_factory.h"
+#include "metadata_backend.h"
 
 namespace {
 

@@ -27,6 +27,8 @@
 struct MetadataBackendConfig
 {
     std::string redis_uri;
+    long connect_timeout_ms = 100;
+    long rw_timeout_ms = 100;
 };
 
 class MetadataBackend

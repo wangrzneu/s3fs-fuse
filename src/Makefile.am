@@ -114,7 +114,7 @@ clang-tidy:
 	clang-tidy -extra-arg-before=-xc++ -extra-arg=-std=@CPP_VERSION@ -header-filter= \
 		*.h $(s3fs_SOURCES) \
 		capacity_policy.cpp test_capacity_policy.cpp \
-		test_curl_util.cpp test_page_list.cpp test_string_util.cpp \
+		test_curl_util.cpp test_page_list.cpp test_string_util.cpp test_metadata_backend_factory.cpp \
 		-- $(DEPS_CFLAGS) $(CPPFLAGS)
 
 #

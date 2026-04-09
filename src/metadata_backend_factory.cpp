@@ -20,8 +20,6 @@
 
 #include "metadata_backend_factory.h"
 
-MetadataBackendPtr CreateRedisMetadataBackend(const MetadataBackendConfig& config);
-
 MetadataBackendPtr CreateMetadataBackend(const MetadataBackendConfig& config)
 {
     if(!config.redis_uri.empty()){

@@ -35,6 +35,15 @@ public:
     }
 };
 
+#ifdef HAVE_HIREDIS
+void ValidateHiredisLinkage()
+{
+    using RedisFreeFn = void (*)(redisContext*);
+    RedisFreeFn volatile redis_free = &redisFree;
+    (void)redis_free;
+}
+#endif
+
 } // namespace
 
 MetadataBackendPtr CreateRedisMetadataBackend(const MetadataBackendConfig& config)
@@ -42,7 +51,7 @@ MetadataBackendPtr CreateRedisMetadataBackend(const MetadataBackendConfig& confi
     (void)config;
 
 #ifdef HAVE_HIREDIS
-    (void)sizeof(redisContext);
+    ValidateHiredisLinkage();
     return std::make_unique<RedisMetadataBackend>();
 #else
     return nullptr;

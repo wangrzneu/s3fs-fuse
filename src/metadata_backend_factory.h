@@ -25,6 +25,7 @@
 
 MetadataBackendPtr CreateMetadataBackend(const MetadataBackendConfig& config);
 MetadataBackendPtr CreateNullMetadataBackend();
+MetadataBackendPtr CreateRedisMetadataBackend(const MetadataBackendConfig& config);
 
 #endif // S3FS_METADATA_BACKEND_FACTORY_H_
 

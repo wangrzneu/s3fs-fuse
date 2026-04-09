@@ -26,6 +26,12 @@ RUN_LEGACY="${RUN_LEGACY:-1}"
 RUN_REDIS_DEFAULT="${RUN_REDIS_DEFAULT:-1}"
 RUN_REDIS_EXPLICIT="${RUN_REDIS_EXPLICIT:-1}"
 REDIS_EXPLICIT_BUCKET_SIZE="${REDIS_EXPLICIT_BUCKET_SIZE:-2TiB}"
+RUN_COMPLEX_FS_OPS="${RUN_COMPLEX_FS_OPS:-1}"
+TIMED_IO_DURATION_SEC="${TIMED_IO_DURATION_SEC:-600}"
+TIMED_IO_TARGET="${TIMED_IO_TARGET:-redis-default}"
+TIMED_IO_SMALL_FILE_BYTES="${TIMED_IO_SMALL_FILE_BYTES:-4096}"
+TIMED_IO_LARGE_FILE_MB="${TIMED_IO_LARGE_FILE_MB:-8}"
+TIMED_IO_PROGRESS_INTERVAL_SEC="${TIMED_IO_PROGRESS_INTERVAL_SEC:-60}"
 
 EXPECTED_1T=$((1024 * 1024 * 1024 * 1024))
 EXPECTED_2T=$((2 * 1024 * 1024 * 1024 * 1024))
@@ -178,6 +184,117 @@ assert_basic_io() {
   run rmdir "$mp/e2e-dir"
 }
 
+assert_complex_fs_ops() {
+  local mp="$1"
+  local root="$mp/e2e-complex"
+
+  log "complex fs ops: start"
+
+  mkdir -p "$root/dir-a/sub-1" "$root/dir-b"
+  printf 'v1\n' > "$root/dir-a/sub-1/file-a.txt"
+  printf 'line-1\nline-2\n' > "$root/dir-a/sub-1/file-b.txt"
+  dd if=/dev/zero of="$root/dir-a/sub-1/blob.bin" bs=1K count=128 status=none
+
+  local first_line
+  first_line="$(head -n1 "$root/dir-a/sub-1/file-a.txt")"
+  assert_eq "v1" "$first_line" "complex ops initial content mismatch"
+
+  printf 'v2\n' > "$root/dir-a/sub-1/file-a.txt"
+  printf 'tail-marker\n' >> "$root/dir-a/sub-1/file-a.txt"
+  truncate -s 2048 "$root/dir-a/sub-1/blob.bin"
+
+  local tail_line
+  tail_line="$(tail -n1 "$root/dir-a/sub-1/file-a.txt")"
+  assert_eq "tail-marker" "$tail_line" "complex ops append mismatch"
+
+  mv "$root/dir-a/sub-1/file-a.txt" "$root/dir-b/file-a-renamed.txt"
+  mv "$root/dir-a/sub-1" "$root/dir-a/sub-1-renamed"
+  mkdir -p "$root/dir-a/sub-1-renamed/new-child"
+  printf 'child-data\n' > "$root/dir-a/sub-1-renamed/new-child/file-c.txt"
+
+  [[ -f "$root/dir-b/file-a-renamed.txt" ]] || fail "complex ops rename file failed"
+  [[ -d "$root/dir-a/sub-1-renamed" ]] || fail "complex ops rename directory failed"
+
+  rm -f "$root/dir-b/file-a-renamed.txt"
+  rm -f "$root/dir-a/sub-1-renamed/file-b.txt"
+  rm -f "$root/dir-a/sub-1-renamed/blob.bin"
+  rm -f "$root/dir-a/sub-1-renamed/new-child/file-c.txt"
+  rmdir "$root/dir-a/sub-1-renamed/new-child"
+  rmdir "$root/dir-a/sub-1-renamed"
+  rmdir "$root/dir-a"
+  rmdir "$root/dir-b"
+  rmdir "$root"
+
+  log "complex fs ops: done"
+}
+
+should_run_timed_io_for_case() {
+  local case_name="$1"
+  [[ "$TIMED_IO_DURATION_SEC" -gt 0 ]] || return 1
+  if [[ "$TIMED_IO_TARGET" == "all" ]]; then
+    return 0
+  fi
+  [[ "$TIMED_IO_TARGET" == "$case_name" ]]
+}
+
+assert_timed_small_large_io() {
+  local mp="$1"
+  local case_name="$2"
+  local root="$mp/e2e-timed-io"
+  local start_ts
+  start_ts="$(date +%s)"
+  local end_ts=$((start_ts + TIMED_IO_DURATION_SEC))
+  local next_progress_ts=$((start_ts + TIMED_IO_PROGRESS_INTERVAL_SEC))
+  local iter=0
+  local small_index=0
+  local large_index=0
+  local large_bytes=$((TIMED_IO_LARGE_FILE_MB * 1024 * 1024))
+  local half_large_bytes=$((large_bytes / 2))
+
+  log "timed io (${case_name}): start duration=${TIMED_IO_DURATION_SEC}s small=${TIMED_IO_SMALL_FILE_BYTES}B large=${TIMED_IO_LARGE_FILE_MB}MiB"
+
+  mkdir -p "$root/small" "$root/large"
+
+  while [[ "$(date +%s)" -lt "$end_ts" ]]; do
+    iter=$((iter + 1))
+    small_index=$((iter % 64))
+    large_index=$((iter % 16))
+
+    local small_file="$root/small/small-${small_index}.dat"
+    local large_file="$root/large/large-${large_index}.bin"
+
+    dd if=/dev/zero of="$small_file" bs="$TIMED_IO_SMALL_FILE_BYTES" count=1 status=none
+    dd if="$small_file" of=/dev/null bs="$TIMED_IO_SMALL_FILE_BYTES" status=none
+    printf 'iter-%s\n' "$iter" >> "$small_file"
+
+    dd if=/dev/zero of="$large_file" bs=1M count="$TIMED_IO_LARGE_FILE_MB" status=none
+    dd if="$large_file" of=/dev/null bs=1M status=none
+    truncate -s "$half_large_bytes" "$large_file"
+    dd if="$large_file" of=/dev/null bs=1M status=none
+    dd if=/dev/zero of="$large_file" bs=1M seek="$TIMED_IO_LARGE_FILE_MB" count=1 conv=notrunc status=none
+    dd if="$large_file" of=/dev/null bs=1M status=none
+
+    if (( iter % 7 == 0 )); then
+      rm -f "$small_file"
+    fi
+    if (( iter % 5 == 0 )); then
+      rm -f "$large_file"
+    fi
+
+    local now_ts
+    now_ts="$(date +%s)"
+    if [[ "$now_ts" -ge "$next_progress_ts" ]]; then
+      log "timed io (${case_name}): progress elapsed=$((now_ts - start_ts))s iter=${iter}"
+      next_progress_ts=$((next_progress_ts + TIMED_IO_PROGRESS_INTERVAL_SEC))
+    fi
+  done
+
+  rm -f "$root/small/"* "$root/large/"* 2>/dev/null || true
+  rmdir "$root/small" "$root/large" "$root" 2>/dev/null || true
+
+  log "timed io (${case_name}): done iterations=${iter}"
+}
+
 mount_and_validate_legacy() {
   local mp="$MOUNT_BASE/legacy"
   mkdir -p "$mp"
@@ -192,6 +309,12 @@ mount_and_validate_legacy() {
   log "legacy mounted pid=$pid"
 
   assert_basic_io "$mp"
+  if [[ "$RUN_COMPLEX_FS_OPS" == "1" ]]; then
+    assert_complex_fs_ops "$mp"
+  fi
+  if should_run_timed_io_for_case "legacy"; then
+    assert_timed_small_large_io "$mp" "legacy"
+  fi
 
   read -r size used avail <<<"$(read_df_size_used_avail "$mp")"
   log "legacy df bytes: size=${size} used=${used} avail=${avail}"
@@ -216,7 +339,13 @@ mount_and_validate_redis_default() {
   log "redis(default) mounted pid=$pid"
 
   assert_basic_io "$mp"
+  if [[ "$RUN_COMPLEX_FS_OPS" == "1" ]]; then
+    assert_complex_fs_ops "$mp"
+  fi
   assert_redis_write_path_counter "$mp" "s3fs:capacity:used_bytes:${BUCKET}"
+  if should_run_timed_io_for_case "redis-default"; then
+    assert_timed_small_large_io "$mp" "redis-default"
+  fi
 
   read -r size used avail <<<"$(read_df_size_used_avail "$mp")"
   log "redis(default) df bytes: size=${size} used=${used} avail=${avail}"
@@ -242,7 +371,13 @@ mount_and_validate_redis_explicit() {
   log "redis(explicit) mounted pid=$pid"
 
   assert_basic_io "$mp"
+  if [[ "$RUN_COMPLEX_FS_OPS" == "1" ]]; then
+    assert_complex_fs_ops "$mp"
+  fi
   assert_redis_write_path_counter "$mp" "s3fs:capacity:used_bytes:${BUCKET}"
+  if should_run_timed_io_for_case "redis-explicit"; then
+    assert_timed_small_large_io "$mp" "redis-explicit"
+  fi
 
   read -r size used avail <<<"$(read_df_size_used_avail "$mp")"
   log "redis(explicit) df bytes: size=${size} used=${used} avail=${avail}"
@@ -259,6 +394,8 @@ main() {
   need_cmd mountpoint
   need_cmd df
   need_cmd awk
+  need_cmd dd
+  need_cmd truncate
   if [[ "$RUN_REDIS_DEFAULT" == "1" || "$RUN_REDIS_EXPLICIT" == "1" ]]; then
     need_cmd redis-cli
   fi

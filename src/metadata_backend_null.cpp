@@ -27,7 +27,7 @@ namespace {
 class NullMetadataBackend final : public MetadataBackend
 {
 public:
-    std::string GetName() const override
+    std::string Name() const override
     {
         return "null";
     }

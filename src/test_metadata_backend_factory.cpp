@@ -32,8 +32,8 @@ void test_empty_redis_uri_returns_null_backend()
     MetadataBackendPtr backend = CreateMetadataBackend(config);
 
     ASSERT_TRUE(backend != nullptr);
-    ASSERT_FALSE(backend->GetName().empty());
-    ASSERT_STREQUALS("null", backend->GetName().c_str());
+    ASSERT_FALSE(backend->Name().empty());
+    ASSERT_STREQUALS("null", backend->Name().c_str());
 }
 
 void test_redis_uri_still_returns_null_backend()
@@ -43,8 +43,8 @@ void test_redis_uri_still_returns_null_backend()
     MetadataBackendPtr backend = CreateMetadataBackend(config);
 
     ASSERT_TRUE(backend != nullptr);
-    ASSERT_FALSE(backend->GetName().empty());
-    ASSERT_STREQUALS("null", backend->GetName().c_str());
+    ASSERT_FALSE(backend->Name().empty());
+    ASSERT_STREQUALS("null", backend->Name().c_str());
 }
 
 } // namespace

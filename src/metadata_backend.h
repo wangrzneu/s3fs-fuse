@@ -34,7 +34,7 @@ class MetadataBackend
 public:
     virtual ~MetadataBackend() = default;
 
-    virtual std::string GetName() const = 0;
+    virtual std::string Name() const = 0;
 };
 
 using MetadataBackendPtr = std::unique_ptr<MetadataBackend>;

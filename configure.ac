@@ -77,7 +77,6 @@ dnl Choice SSL library
 dnl ----------------------------------------------
 auth_lib=na
 nettle_lib=no
-use_openssl_30=no
 
 dnl
 dnl nettle library
@@ -204,17 +203,22 @@ case "${auth_lib}" in
 openssl)
   AC_MSG_RESULT(OpenSSL)
   AS_IF([test "$found_fuse_t" = "yes"],
-    [PKG_CHECK_MODULES([DEPS], [fuse-t >= ${min_fuse_t_version} libcurl >= 7.0 libxml-2.0 >= 2.6 libcrypto >= 0.9 ])],
-    [PKG_CHECK_MODULES([DEPS], [fuse3 >= ${min_fuse_version} libcurl >= 7.0 libxml-2.0 >= 2.6 libcrypto >= 0.9 ])])
+    [PKG_CHECK_MODULES([DEPS], [fuse-t >= ${min_fuse_t_version} libcurl >= 7.0 libxml-2.0 >= 2.9 libcrypto >= 1.1.1 ])],
+    [PKG_CHECK_MODULES([DEPS], [fuse3 >= ${min_fuse_version} libcurl >= 7.0 libxml-2.0 >= 2.9 libcrypto >= 1.1.1 ])])
 
-  AC_MSG_CHECKING([openssl 3.0 or later])
+  saved_CPPFLAGS="$CPPFLAGS"
+  CPPFLAGS="$CPPFLAGS $DEPS_CFLAGS"
+
+  AC_MSG_CHECKING([openssl 1.1.1 or later])
   AC_COMPILE_IFELSE(
-    [AC_LANG_PROGRAM([[#include <openssl/opensslv.h>
-                       #if !defined(LIBRESSL_VERSION_NUMBER) && OPENSSL_VERSION_NUMBER >= 0x30000000L
-                         #error "found openssl is 3.0 or later(so compiling is stopped with error)"
-                       #endif]], [[]])],
-    [AC_MSG_RESULT(no)],
-    [AC_MSG_RESULT(yes); use_openssl_30=yes])
+    [AC_LANG_PROGRAM([[#include <openssl/opensslv.h>]],
+      [[#if OPENSSL_VERSION_NUMBER < 0x10101000L
+        #error "OpenSSL >= 1.1.1 required"
+      #endif]])],
+    [AC_MSG_RESULT(yes)],
+    [AC_MSG_ERROR([OpenSSL >= 1.1.1 is required, found an older version])])
+
+  CPPFLAGS="$saved_CPPFLAGS"
   ;;
 gnutls)
   AC_MSG_RESULT(GnuTLS-gcrypt)
@@ -224,8 +228,8 @@ gnutls)
   AS_IF([test $gnutls_nettle = 0],
     [
       AS_IF([test "$found_fuse_t" = "yes"],
-        [PKG_CHECK_MODULES([DEPS], [fuse-t >= ${min_fuse_t_version} libcurl >= 7.0 libxml-2.0 >= 2.6 gnutls >= 2.12.0 ])],
-        [PKG_CHECK_MODULES([DEPS], [fuse3 >= ${min_fuse_version} libcurl >= 7.0 libxml-2.0 >= 2.6 gnutls >= 2.12.0 ])])
+        [PKG_CHECK_MODULES([DEPS], [fuse-t >= ${min_fuse_t_version} libcurl >= 7.0 libxml-2.0 >= 2.9 gnutls >= 2.12.0 ])],
+        [PKG_CHECK_MODULES([DEPS], [fuse3 >= ${min_fuse_version} libcurl >= 7.0 libxml-2.0 >= 2.9 gnutls >= 2.12.0 ])])
       LIBS="-lgnutls -lgcrypt $LIBS"
       AC_MSG_CHECKING([gnutls is build with])
       AC_MSG_RESULT(gcrypt)
@@ -240,8 +244,8 @@ nettle)
   AS_IF([test $gnutls_nettle = 1],
     [
       AS_IF([test "$found_fuse_t" = "yes"],
-        [PKG_CHECK_MODULES([DEPS], [fuse-t >= ${min_fuse_t_version} libcurl >= 7.0 libxml-2.0 >= 2.6 nettle >= 2.7.1 ])],
-        [PKG_CHECK_MODULES([DEPS], [fuse3 >= ${min_fuse_version} libcurl >= 7.0 libxml-2.0 >= 2.6 nettle >= 2.7.1 ])])
+        [PKG_CHECK_MODULES([DEPS], [fuse-t >= ${min_fuse_t_version} libcurl >= 7.0 libxml-2.0 >= 2.9 nettle >= 2.7.1 ])],
+        [PKG_CHECK_MODULES([DEPS], [fuse3 >= ${min_fuse_version} libcurl >= 7.0 libxml-2.0 >= 2.9 nettle >= 2.7.1 ])])
       LIBS="-lgnutls -lnettle $LIBS"
       AC_MSG_CHECKING([gnutls is build with])
       AC_MSG_RESULT(nettle)
@@ -251,8 +255,8 @@ nettle)
 nss)
   AC_MSG_RESULT(NSS)
   AS_IF([test "$found_fuse_t" = "yes"],
-        [PKG_CHECK_MODULES([DEPS], [fuse-t >= ${min_fuse_t_version} libcurl >= 7.0 libxml-2.0 >= 2.6 nss >= 3.15.0 ])],
-        [PKG_CHECK_MODULES([DEPS], [fuse3 >= ${min_fuse_version} libcurl >= 7.0 libxml-2.0 >= 2.6 nss >= 3.15.0 ])])
+        [PKG_CHECK_MODULES([DEPS], [fuse-t >= ${min_fuse_t_version} libcurl >= 7.0 libxml-2.0 >= 2.9 nss >= 3.15.0 ])],
+        [PKG_CHECK_MODULES([DEPS], [fuse3 >= ${min_fuse_version} libcurl >= 7.0 libxml-2.0 >= 2.9 nss >= 3.15.0 ])])
   ;;
 *)
   AC_MSG_ERROR([unknown ssl library type.])
@@ -260,7 +264,6 @@ nss)
 esac
 
 AM_CONDITIONAL([USE_SSL_OPENSSL], [test "$auth_lib" = openssl])
-AM_CONDITIONAL([USE_SSL_OPENSSL_30], [test "$use_openssl_30" = yes])
 AM_CONDITIONAL([USE_SSL_GNUTLS], [test "$auth_lib" = gnutls -o "$auth_lib" = nettle])
 AM_CONDITIONAL([USE_GNUTLS_NETTLE], [test "$auth_lib" = nettle])
 AM_CONDITIONAL([USE_SSL_NSS], [test "$auth_lib" = nss])

@@ -80,7 +80,7 @@ PACKAGE_ENABLE_REPO_OPTIONS=""
 PACKAGE_INSTALL_ADDITIONAL_OPTIONS=""
 CURL_DIRECT_INSTALL=0
 
-if [ "${CONTAINER_FULLNAME}" = "ubuntu:25.10" ]; then
+if [ "${CONTAINER_FULLNAME}" = "ubuntu:26.04" ]; then
     PACKAGE_MANAGER_BIN="apt-get"
     PACKAGE_UPDATE_OPTIONS="update -y -qq"
     PACKAGE_INSTALL_OPTIONS="install -y"
@@ -287,8 +287,8 @@ elif [ "${CONTAINER_FULLNAME}" = "rockylinux/rockylinux:8" ]; then
 
     CURL_DIRECT_INSTALL=1
 
-elif [ "${CONTAINER_FULLNAME}" = "fedora:43" ] ||
-     [ "${CONTAINER_FULLNAME}" = "fedora:42" ]; then
+elif [ "${CONTAINER_FULLNAME}" = "fedora:44" ] ||
+     [ "${CONTAINER_FULLNAME}" = "fedora:43" ]; then
     PACKAGE_MANAGER_BIN="dnf"
     PACKAGE_UPDATE_OPTIONS="update -y -qq"
     PACKAGE_INSTALL_OPTIONS="install -y"

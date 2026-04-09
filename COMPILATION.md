@@ -17,8 +17,8 @@ Keep in mind using the pre-built packages when available.
     - clang++ >= 3.5
 * make
 * libcurl
-* libxml2
-* openssl/gnutls/nss
+* libxml2 >= 2.9
+* OpenSSL >= 1.1.1 / GnuTLS / NSS
     * Please prepare the library according to the OS on which you will compile.
     * It is necessary to match the library used by libcurl.
     * Install the OpenSSL, GnuTLS or NSS devel package.
@@ -57,8 +57,8 @@ Keep in mind using the pre-built packages when available.
 
 * fuse >= 3.0.0
 * libcurl
-* libxml2
-* openssl/gnutls/nss
+* libxml2 >= 2.9
+* OpenSSL >= 1.1.1 / GnuTLS / NSS
 * mime.types (the package providing depends on the OS)
 
 ## Compilation on macOS

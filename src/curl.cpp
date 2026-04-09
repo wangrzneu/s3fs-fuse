@@ -69,7 +69,9 @@ static constexpr int GET_OBJECT_RESPONSE_LIMIT          = 1024;
 // error.
 //
 static constexpr char DEFAULT_MIME_FILE[]               = "/etc/mime.types";
+#ifdef __APPLE__
 static constexpr char SPECIAL_DARWIN_MIME_FILE[]        = "/etc/apache2/mime.types";
+#endif
 
 // [NOTICE]
 // This symbol is for libcurl under 7.23.0
@@ -249,15 +251,16 @@ bool S3fsCurl::InitMimeType(const std::string& strFile)
         struct stat st;
         if(0 == stat(DEFAULT_MIME_FILE, &st)){
             MimeFile = DEFAULT_MIME_FILE;
-        }else if(compare_sysname("Darwin")){
-            // for macOS, search another default file.
-            if(0 == stat(SPECIAL_DARWIN_MIME_FILE, &st)){
-                MimeFile = SPECIAL_DARWIN_MIME_FILE;
-            }else{
-                errPaths += " and ";
-                errPaths += SPECIAL_DARWIN_MIME_FILE;
-            }
         }
+#ifdef __APPLE__
+        // for macOS, search another default file.
+        else if(0 == stat(SPECIAL_DARWIN_MIME_FILE, &st)){
+            MimeFile = SPECIAL_DARWIN_MIME_FILE;
+        }else{
+            errPaths += " and ";
+            errPaths += SPECIAL_DARWIN_MIME_FILE;
+        }
+#endif
         if(MimeFile.empty()){
             S3FS_PRN_WARN("Could not find mime.types files, you have to create file(%s) or specify mime option for existing mime.types file.", errPaths.c_str());
             return false;
@@ -640,7 +643,7 @@ bool S3fsCurl::PushbackSseKeys(const std::string& input)
     std::string raw_key;
     if(onekey.length() > 256 / 8){
         std::string p_key(s3fs_decode64(onekey.c_str(), onekey.size()));
-        raw_key = p_key;
+        raw_key = std::move(p_key);
         base64_key = onekey;
     } else {
         base64_key = s3fs_base64(reinterpret_cast<const unsigned char*>(onekey.c_str()), onekey.length());
@@ -657,7 +660,7 @@ bool S3fsCurl::PushbackSseKeys(const std::string& input)
     sseckeymap_t md5map;
     md5map.clear();
     md5map[strMd5] = base64_key;
-    S3fsCurl::sseckeys.push_back(md5map);
+    S3fsCurl::sseckeys.push_back(std::move(md5map));
 
     return true;
 }
@@ -2696,9 +2699,8 @@ bool S3fsCurl::GetIAMRoleFromMetaData(const char* cred_url, const char* iam_v2_t
     return (0 == result);
 }
 
-bool S3fsCurl::AddSseRequestHead(sse_type_t ssetype, const std::string& input, bool is_copy)
+bool S3fsCurl::AddSseRequestHead(sse_type_t ssetype, std::string ssevalue, bool is_copy)
 {
-    std::string ssevalue = input;
     switch(ssetype){
         case sse_type_t::SSE_DISABLE:
             return true;
@@ -2743,7 +2745,7 @@ bool S3fsCurl::AddSseRequestHead(sse_type_t ssetype, const std::string& input, b
 
 //
 // tpath :      target path for head request
-// ssekey_pos : -1    means "not" SSE-C type
+// ssekey_pos : SIZE_MAX means "not" SSE-C type
 //              0 - X means SSE-C type and position for SSE-C key(0 is latest key)
 //
 bool S3fsCurl::PreHeadRequest(const char* tpath, size_t ssekey_pos)
@@ -2764,7 +2766,7 @@ bool S3fsCurl::PreHeadRequest(const char* tpath, size_t ssekey_pos)
     responseHeaders.clear();
 
     // requestHeaders(SSE-C)
-    if(0 <= static_cast<ssize_t>(ssekey_pos) && ssekey_pos < S3fsCurl::sseckeys.size()){
+    if(SIZE_MAX != static_cast<ssize_t>(ssekey_pos) && ssekey_pos < S3fsCurl::sseckeys.size()){
         std::string md5;
         if(!S3fsCurl::GetSseKeyMd5(ssekey_pos, md5) || !AddSseRequestHead(sse_type_t::SSE_C, md5, false)){
             S3FS_PRN_ERR("Failed to set SSE-C headers for sse-c key pos(%zu)(=md5(%s)).", ssekey_pos, mask_sensitive_string(md5.c_str()));
@@ -3831,6 +3833,8 @@ bool S3fsCurl::MultipartUploadPartComplete()
 {
     bool result;
     if(-1 == partdata.fd){
+        // cppcheck-suppress unmatchedSuppression
+        // cppcheck-suppress knownConditionTrueFalse
         result = MultipartUploadCopyPartComplete();
     }else{
         result = MultipartUploadContentPartComplete();

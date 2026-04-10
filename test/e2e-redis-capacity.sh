@@ -5,6 +5,7 @@ set -euo pipefail
 # 1) baseline s3fs behavior (legacy mode)
 # 2) redis capacity mode defaults (1TiB when bucket_size is not set)
 # 3) redis capacity mode explicit bucket_size
+# 4) redis capacity mode with 10GiB limit: write over limit must fail, then delete and retry must succeed
 #
 # Usage example:
 #   BUCKET=my-bucket \
@@ -14,7 +15,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 S3FS_BIN="${S3FS_BIN:-$ROOT_DIR/src/s3fs}"
-MOUNT_BASE="${MOUNT_BASE:-/tmp/s3fs-e2e}"
+E2E_RUN_ID="${E2E_RUN_ID:-$(date +%s)-$$-$RANDOM}"
+MOUNT_BASE="${MOUNT_BASE:-/tmp/s3fs-e2e-${E2E_RUN_ID}}"
 PASSWD_FILE="${PASSWD_FILE:-}"
 BUCKET="${BUCKET:-}"
 REDIS_URI="${REDIS_URI:-redis://127.0.0.1:6379/0}"
@@ -26,6 +28,7 @@ KEEP_MOUNT="${KEEP_MOUNT:-0}"
 RUN_LEGACY="${RUN_LEGACY:-1}"
 RUN_REDIS_DEFAULT="${RUN_REDIS_DEFAULT:-1}"
 RUN_REDIS_EXPLICIT="${RUN_REDIS_EXPLICIT:-1}"
+RUN_REDIS_LIMIT_10G="${RUN_REDIS_LIMIT_10G:-1}"
 REDIS_EXPLICIT_BUCKET_SIZE="${REDIS_EXPLICIT_BUCKET_SIZE:-2TiB}"
 RUN_COMPLEX_FS_OPS="${RUN_COMPLEX_FS_OPS:-1}"
 TIMED_IO_DURATION_SEC="${TIMED_IO_DURATION_SEC:-600}"
@@ -33,9 +36,15 @@ TIMED_IO_TARGET="${TIMED_IO_TARGET:-redis-default}"
 TIMED_IO_SMALL_FILE_BYTES="${TIMED_IO_SMALL_FILE_BYTES:-4096}"
 TIMED_IO_LARGE_FILE_MB="${TIMED_IO_LARGE_FILE_MB:-8}"
 TIMED_IO_PROGRESS_INTERVAL_SEC="${TIMED_IO_PROGRESS_INTERVAL_SEC:-60}"
+REDIS_LIMIT_BUCKET_SIZE="${REDIS_LIMIT_BUCKET_SIZE:-10GiB}"
+CAPACITY_LIMIT_MAX_ATTEMPTS="${CAPACITY_LIMIT_MAX_ATTEMPTS:-2048}"
+REDIS_INSTANCE_DEFAULT="${REDIS_INSTANCE_DEFAULT:-e2e-redis-default}"
+REDIS_INSTANCE_EXPLICIT="${REDIS_INSTANCE_EXPLICIT:-e2e-redis-explicit}"
+REDIS_INSTANCE_LIMIT_10G="${REDIS_INSTANCE_LIMIT_10G:-e2e-redis-limit-10g}"
 
 EXPECTED_1T=$((1024 * 1024 * 1024 * 1024))
 EXPECTED_2T=$((2 * 1024 * 1024 * 1024 * 1024))
+EXPECTED_10G=$((10 * 1024 * 1024 * 1024))
 NS_IN_MS=1000000
 NS_IN_SEC=1000000000
 
@@ -135,6 +144,41 @@ print_perf_summary() {
 
 unmount_if_needed() {
   local mp="$1"
+  local unmounted=0
+
+  if ! mountpoint -q "$mp"; then
+    return 0
+  fi
+
+  if command -v fusermount3 >/dev/null 2>&1; then
+    if fusermount3 -u "$mp" >/dev/null 2>&1; then
+      unmounted=1
+    fi
+  elif command -v fusermount >/dev/null 2>&1; then
+    if fusermount -u "$mp" >/dev/null 2>&1; then
+      unmounted=1
+    fi
+  else
+    if umount "$mp" >/dev/null 2>&1; then
+      unmounted=1
+    fi
+  fi
+
+  if (( unmounted == 1 )); then
+    return 0
+  fi
+
+  local stale_pids=""
+  stale_pids="$(pgrep -f "s3fs .* ${mp}" || true)"
+  if [[ -n "$stale_pids" ]]; then
+    log "stale mount detected, terminating s3fs pids for ${mp}: ${stale_pids}"
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] || continue
+      kill "$pid" >/dev/null 2>&1 || true
+    done <<< "$stale_pids"
+    sleep 2
+  fi
+
   if mountpoint -q "$mp"; then
     if command -v fusermount3 >/dev/null 2>&1; then
       run fusermount3 -u "$mp"
@@ -144,6 +188,30 @@ unmount_if_needed() {
       run umount "$mp"
     fi
   fi
+}
+
+prepare_mountpoint() {
+  local mp="$1"
+  mkdir -p "$mp"
+  unmount_if_needed "$mp" || true
+  if mountpoint -q "$mp"; then
+    fail "mountpoint still busy after cleanup: ${mp}"
+  fi
+}
+
+wait_mount_ready() {
+  local mp="$1"
+  local pid="$2"
+  local case_name="$3"
+
+  sleep 4
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    if mountpoint -q "$mp"; then
+      fail "${case_name} mount pid exited early and found stale mounted path: ${mp}"
+    fi
+    fail "${case_name} mount process exited early: pid=${pid}"
+  fi
+  mountpoint -q "$mp" || fail "${case_name} mount failed"
 }
 
 cleanup_mount() {
@@ -180,6 +248,11 @@ common_mount_opts() {
     opts+=",use_path_request_style"
   fi
   printf '%s' "$opts"
+}
+
+redis_used_bytes_key_for_instance() {
+  local instance="$1"
+  printf 's3fs:capacity:used_bytes:%s:[%s]' "$BUCKET" "$instance"
 }
 
 read_df_size_used_avail() {
@@ -347,6 +420,94 @@ should_run_timed_io_for_case() {
   [[ "$TIMED_IO_TARGET" == "$case_name" ]]
 }
 
+assert_capacity_limit_recovery() {
+  local mp="$1"
+  local case_name="$2"
+  local capacity_bytes="$3"
+  local run_id
+  run_id="$(date +%s)-$$-$RANDOM"
+  local fill_prefix="$mp/e2e-capacity-fill-${case_name}-${run_id}"
+  local retry_file="$mp/e2e-capacity-retry-${case_name}-${run_id}.bin"
+  local stale_fill_pattern="${mp}/e2e-capacity-fill-${case_name}-*.bin"
+  local stale_retry_pattern="${mp}/e2e-capacity-retry-${case_name}-*.bin"
+  local chunk_mib=256
+  local max_attempts="$CAPACITY_LIMIT_MAX_ATTEMPTS"
+  local probe_file=""
+  local last_success_file=""
+  local fail_reason=""
+  local hit_limit=0
+  local attempt=0
+  local begin_ns
+  local end_ns
+  local err_file
+  local cleanup_file
+  local -a created_files=()
+
+  err_file="$(mktemp)"
+
+  log "capacity limit (${case_name}): start"
+
+  run find "$mp" -maxdepth 1 -type f -name "$(basename "$stale_fill_pattern")" -delete
+  run find "$mp" -maxdepth 1 -type f -name "$(basename "$stale_retry_pattern")" -delete
+
+  begin_ns="$(now_ns)"
+  while (( chunk_mib >= 1 )); do
+    probe_file="${fill_prefix}-probe-${chunk_mib}.bin"
+    if dd if=/dev/zero of="$probe_file" bs=1M count="$chunk_mib" status=none 2>"$err_file"; then
+      last_success_file="$probe_file"
+      created_files+=("$probe_file")
+      break
+    fi
+    rm -f "$probe_file"
+    chunk_mib=$((chunk_mib / 2))
+  done
+  end_ns="$(now_ns)"
+  record_perf_ns "${case_name}.limit_probe_chunk" "$((end_ns - begin_ns))"
+
+  [[ -n "$last_success_file" ]] || fail "capacity limit probe could not write even 1MiB chunk"
+
+  begin_ns="$(now_ns)"
+  for ((attempt = 1; attempt <= max_attempts; ++attempt)); do
+    local fill_file="${fill_prefix}-${attempt}.bin"
+    if dd if=/dev/zero of="$fill_file" bs=1M count="$chunk_mib" status=none 2>"$err_file"; then
+      last_success_file="$fill_file"
+      created_files+=("$fill_file")
+      if (( attempt % 200 == 0 )); then
+        log "capacity limit (${case_name}) progress: attempt=${attempt} chunk_mib=${chunk_mib}"
+      fi
+      continue
+    fi
+
+    fail_reason="$(cat "$err_file")"
+    hit_limit=1
+    break
+  done
+  end_ns="$(now_ns)"
+  record_perf_ns "${case_name}.limit_fill_until_fail" "$((end_ns - begin_ns))"
+
+  (( hit_limit == 1 )) || fail "capacity limit did not trigger within ${max_attempts} writes (chunk=${chunk_mib}MiB)"
+  [[ "$fail_reason" == *"File too large"* ]] || fail "expected capacity-limit failure, got: ${fail_reason}"
+
+  run rm -f "$last_success_file"
+  sleep 2
+
+  begin_ns="$(now_ns)"
+  if ! dd if=/dev/zero of="$retry_file" bs=1M count="$chunk_mib" status=none 2>"$err_file"; then
+    fail "expected retry write success after deleting one file, got: $(cat "$err_file")"
+  fi
+  created_files+=("$retry_file")
+  sleep 2
+  end_ns="$(now_ns)"
+  record_perf_ns "${case_name}.limit_retry_write_success" "$((end_ns - begin_ns))"
+
+  for cleanup_file in "${created_files[@]}"; do
+    rm -f "$cleanup_file" || true
+  done
+  rm -f "$err_file"
+
+  log "capacity limit (${case_name}): done capacity=${capacity_bytes} chunk_mib=${chunk_mib} attempts_before_fail=${attempt}"
+}
+
 assert_timed_small_large_io() {
   local mp="$1"
   local case_name="$2"
@@ -463,7 +624,7 @@ assert_timed_small_large_io() {
 
 mount_and_validate_legacy() {
   local mp="$MOUNT_BASE/legacy"
-  mkdir -p "$mp"
+  prepare_mountpoint "$mp"
   trap 'cleanup_mount "'"$mp"'"' RETURN
 
   local opts
@@ -472,8 +633,7 @@ mount_and_validate_legacy() {
   mount_begin_ns="$(now_ns)"
   run "$S3FS_BIN" "$BUCKET" "$mp" -o "$opts" -f &
   local pid=$!
-  sleep 4
-  mountpoint -q "$mp" || fail "legacy mount failed"
+  wait_mount_ready "$mp" "$pid" "legacy"
   local mount_end_ns
   mount_end_ns="$(now_ns)"
   record_perf_ns "legacy.mount_ready" "$((mount_end_ns - mount_begin_ns))"
@@ -507,18 +667,21 @@ mount_and_validate_legacy() {
 
 mount_and_validate_redis_default() {
   local mp="$MOUNT_BASE/redis-default"
-  mkdir -p "$mp"
+  local instance_name="$REDIS_INSTANCE_DEFAULT"
+  local redis_key
+  redis_key="$(redis_used_bytes_key_for_instance "$instance_name")"
+  prepare_mountpoint "$mp"
   trap 'cleanup_mount "'"$mp"'"' RETURN
 
   local opts
   opts="$(common_mount_opts)"
-  opts+=",capacity_mode=redis,redis_meta=${REDIS_URI}"
+  opts+=",capacity_mode=redis,redis_meta=${REDIS_URI},instance_name=${instance_name}"
+  run redis-cli DEL "$redis_key"
   local mount_begin_ns
   mount_begin_ns="$(now_ns)"
   run "$S3FS_BIN" "$BUCKET" "$mp" -o "$opts" -f &
   local pid=$!
-  sleep 4
-  mountpoint -q "$mp" || fail "redis default mount failed"
+  wait_mount_ready "$mp" "$pid" "redis-default"
   local mount_end_ns
   mount_end_ns="$(now_ns)"
   record_perf_ns "redis-default.mount_ready" "$((mount_end_ns - mount_begin_ns))"
@@ -528,7 +691,7 @@ mount_and_validate_redis_default() {
   if [[ "$RUN_COMPLEX_FS_OPS" == "1" ]]; then
     measure_call "redis-default.complex_fs_ops" assert_complex_fs_ops "$mp" "redis-default"
   fi
-  measure_call "redis-default.redis_counter" assert_redis_write_path_counter "$mp" "s3fs:capacity:used_bytes:${BUCKET}" "redis-default"
+  measure_call "redis-default.redis_counter" assert_redis_write_path_counter "$mp" "$redis_key" "redis-default"
   if should_run_timed_io_for_case "redis-default"; then
     measure_call "redis-default.timed_small_large_io" assert_timed_small_large_io "$mp" "redis-default"
   fi
@@ -548,24 +711,28 @@ mount_and_validate_redis_default() {
   unmount_begin_ns="$(now_ns)"
   cleanup_mount "$mp"
   kill "$pid" >/dev/null 2>&1 || true
+  run redis-cli DEL "$redis_key"
   unmount_end_ns="$(now_ns)"
   record_perf_ns "redis-default.unmount_cleanup" "$((unmount_end_ns - unmount_begin_ns))"
 }
 
 mount_and_validate_redis_explicit() {
   local mp="$MOUNT_BASE/redis-explicit"
-  mkdir -p "$mp"
+  local instance_name="$REDIS_INSTANCE_EXPLICIT"
+  local redis_key
+  redis_key="$(redis_used_bytes_key_for_instance "$instance_name")"
+  prepare_mountpoint "$mp"
   trap 'cleanup_mount "'"$mp"'"' RETURN
 
   local opts
   opts="$(common_mount_opts)"
-  opts+=",capacity_mode=redis,redis_meta=${REDIS_URI},bucket_size=${REDIS_EXPLICIT_BUCKET_SIZE}"
+  opts+=",capacity_mode=redis,redis_meta=${REDIS_URI},bucket_size=${REDIS_EXPLICIT_BUCKET_SIZE},instance_name=${instance_name}"
+  run redis-cli DEL "$redis_key"
   local mount_begin_ns
   mount_begin_ns="$(now_ns)"
   run "$S3FS_BIN" "$BUCKET" "$mp" -o "$opts" -f &
   local pid=$!
-  sleep 4
-  mountpoint -q "$mp" || fail "redis explicit mount failed"
+  wait_mount_ready "$mp" "$pid" "redis-explicit"
   local mount_end_ns
   mount_end_ns="$(now_ns)"
   record_perf_ns "redis-explicit.mount_ready" "$((mount_end_ns - mount_begin_ns))"
@@ -575,7 +742,7 @@ mount_and_validate_redis_explicit() {
   if [[ "$RUN_COMPLEX_FS_OPS" == "1" ]]; then
     measure_call "redis-explicit.complex_fs_ops" assert_complex_fs_ops "$mp" "redis-explicit"
   fi
-  measure_call "redis-explicit.redis_counter" assert_redis_write_path_counter "$mp" "s3fs:capacity:used_bytes:${BUCKET}" "redis-explicit"
+  measure_call "redis-explicit.redis_counter" assert_redis_write_path_counter "$mp" "$redis_key" "redis-explicit"
   if should_run_timed_io_for_case "redis-explicit"; then
     measure_call "redis-explicit.timed_small_large_io" assert_timed_small_large_io "$mp" "redis-explicit"
   fi
@@ -597,8 +764,56 @@ mount_and_validate_redis_explicit() {
   unmount_begin_ns="$(now_ns)"
   cleanup_mount "$mp"
   kill "$pid" >/dev/null 2>&1 || true
+  run redis-cli DEL "$redis_key"
   unmount_end_ns="$(now_ns)"
   record_perf_ns "redis-explicit.unmount_cleanup" "$((unmount_end_ns - unmount_begin_ns))"
+}
+
+mount_and_validate_redis_limit_10g() {
+  local mp="$MOUNT_BASE/redis-limit-10g"
+  local instance_name="$REDIS_INSTANCE_LIMIT_10G"
+  local redis_key
+  redis_key="$(redis_used_bytes_key_for_instance "$instance_name")"
+  prepare_mountpoint "$mp"
+  trap 'cleanup_mount "'"$mp"'"' RETURN
+
+  local opts
+  opts="$(common_mount_opts)"
+  opts+=",capacity_mode=redis,redis_meta=${REDIS_URI},bucket_size=${REDIS_LIMIT_BUCKET_SIZE},instance_name=${instance_name}"
+  run redis-cli DEL "$redis_key"
+  local mount_begin_ns
+  mount_begin_ns="$(now_ns)"
+  run "$S3FS_BIN" "$BUCKET" "$mp" -o "$opts" -f &
+  local pid=$!
+  wait_mount_ready "$mp" "$pid" "redis-limit-10g"
+  local mount_end_ns
+  mount_end_ns="$(now_ns)"
+  record_perf_ns "redis-limit-10g.mount_ready" "$((mount_end_ns - mount_begin_ns))"
+  log "redis(limit-10g) mounted pid=$pid"
+
+  measure_call "redis-limit-10g.basic_io" assert_basic_io "$mp"
+  measure_call "redis-limit-10g.capacity_limit_recovery" assert_capacity_limit_recovery "$mp" "redis-limit-10g" "$EXPECTED_10G"
+
+  local statfs_begin_ns
+  local statfs_end_ns
+  statfs_begin_ns="$(now_ns)"
+  read -r size used avail <<<"$(read_df_size_used_avail "$mp")"
+  statfs_end_ns="$(now_ns)"
+  record_perf_ns "redis-limit-10g.statfs" "$((statfs_end_ns - statfs_begin_ns))"
+  log "redis(limit-10g) df bytes: size=${size} used=${used} avail=${avail}"
+  if [[ "$REDIS_LIMIT_BUCKET_SIZE" == "10GiB" ]]; then
+    assert_eq "$EXPECTED_10G" "$size" "redis limit bucket_size should be 10GiB"
+  fi
+  assert_ge "$size" "$avail" "redis limit size must be >= avail"
+
+  local unmount_begin_ns
+  local unmount_end_ns
+  unmount_begin_ns="$(now_ns)"
+  cleanup_mount "$mp"
+  kill "$pid" >/dev/null 2>&1 || true
+  run redis-cli DEL "$redis_key"
+  unmount_end_ns="$(now_ns)"
+  record_perf_ns "redis-limit-10g.unmount_cleanup" "$((unmount_end_ns - unmount_begin_ns))"
 }
 
 main() {
@@ -609,13 +824,15 @@ main() {
   need_cmd mktemp
   need_cmd dd
   need_cmd truncate
-  if [[ "$RUN_REDIS_DEFAULT" == "1" || "$RUN_REDIS_EXPLICIT" == "1" ]]; then
+  need_cmd pgrep
+  if [[ "$RUN_REDIS_DEFAULT" == "1" || "$RUN_REDIS_EXPLICIT" == "1" || "$RUN_REDIS_LIMIT_10G" == "1" ]]; then
     need_cmd redis-cli
   fi
 
   [[ -n "$BUCKET" ]] || fail "BUCKET is required"
   [[ -n "$PASSWD_FILE" ]] || fail "PASSWD_FILE is required"
   [[ -x "$S3FS_BIN" || "$SKIP_BUILD" == "0" ]] || fail "s3fs binary not found: $S3FS_BIN"
+  log "run_id=${E2E_RUN_ID} mount_base=${MOUNT_BASE}"
 
   measure_call "build_if_needed" build_if_needed
 
@@ -635,6 +852,11 @@ main() {
   if [[ "$RUN_REDIS_EXPLICIT" == "1" ]]; then
     log "==== Case 3: redis mode with explicit bucket_size=${REDIS_EXPLICIT_BUCKET_SIZE} ===="
     measure_call "case.redis-explicit.total" mount_and_validate_redis_explicit
+  fi
+
+  if [[ "$RUN_REDIS_LIMIT_10G" == "1" ]]; then
+    log "==== Case 4: redis mode with capacity limit bucket_size=${REDIS_LIMIT_BUCKET_SIZE} ===="
+    measure_call "case.redis-limit-10g.total" mount_and_validate_redis_limit_10g
   fi
 
   print_perf_summary

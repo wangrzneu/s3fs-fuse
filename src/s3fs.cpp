@@ -153,8 +153,11 @@ static fsblkcnt_t parse_bucket_size(std::string max_size);
 static bool is_cmd_exists(const std::string& command);
 static int print_umount_message(const std::string& mp, bool force) __attribute__ ((unused));
 static uint64_t get_used_bytes_for_capacity_policy();
+static uint64_t get_total_capacity_bytes_for_policy();
 static int64_t calculate_used_bytes_delta(off_t before_size, off_t after_size);
 static bool add_used_bytes_delta_for_capacity_policy(int64_t delta, const char* path);
+static bool would_exceed_capacity_with_growth(uint64_t growth_bytes, const char* path);
+static bool ensure_capacity_for_resize(off_t uploaded_size, off_t target_size, const char* path);
 static bool try_get_object_size_for_capacity(const char* path, off_t& size);
 static void apply_used_bytes_delta_from_entity(FdEntity* ent, off_t before_size, const char* path);
 
@@ -2957,6 +2960,9 @@ static int s3fs_truncate(const char* _path, off_t size FUSE3_FILE_INFO_ARG)
     if(0 == (result = get_object_attribute(path, nullptr, &meta))){
         // File exists
         const off_t truncate_base_size = std::max<off_t>(get_size(meta), 0);
+        if(!ensure_capacity_for_resize(truncate_base_size, size, path)){
+            return -EFBIG;
+        }
 
         // [NOTE]
         // If the file exists, the file has already been opened by FUSE before
@@ -3012,6 +3018,10 @@ static int s3fs_truncate(const char* _path, off_t size FUSE3_FILE_INFO_ARG)
 
     }else{
         // Not found -> Make tmpfile(with size)
+        if(!ensure_capacity_for_resize(/*uploaded_size=*/0, size, path)){
+            return -EFBIG;
+        }
+
         const struct fuse_context* pcxt;
         if(nullptr == (pcxt = fuse_get_context())){
             return -EIO;
@@ -3191,6 +3201,37 @@ static int s3fs_write(const char* _path, const char* buf, size_t size, off_t off
         return -EIO;
     }
 
+    if(capacity_mode == CapacityMode::Redis){
+        off_t uploaded_size = 0;
+        ent->GetOriginalMetaSize(uploaded_size);
+
+        off_t current_size = 0;
+        if(!ent->GetSize(current_size)){
+            return -EIO;
+        }
+
+        if(offset < 0){
+            return -EINVAL;
+        }
+
+        const uint64_t offset_u = static_cast<uint64_t>(offset);
+        const uint64_t size_u = static_cast<uint64_t>(size);
+        if(offset_u > (std::numeric_limits<uint64_t>::max() - size_u)){
+            return -EFBIG;
+        }
+
+        const uint64_t write_end_u = offset_u + size_u;
+        const uint64_t current_size_u = static_cast<uint64_t>(std::max<off_t>(current_size, 0));
+        const uint64_t target_size_u = std::max(current_size_u, write_end_u);
+        if(target_size_u > static_cast<uint64_t>(std::numeric_limits<off_t>::max())){
+            return -EFBIG;
+        }
+
+        if(!ensure_capacity_for_resize(uploaded_size, static_cast<off_t>(target_size_u), path)){
+            return -EFBIG;
+        }
+    }
+
     if(0 > (res = ent->Write(static_cast<int>(fi->fh), buf, offset, size))){
         S3FS_PRN_WARN("failed to write file(%s). result=%zd", path, res);
     }
@@ -3243,6 +3284,13 @@ static int64_t calculate_used_bytes_delta(off_t before_size, off_t after_size)
     return -static_cast<int64_t>(diff);
 }
 
+static uint64_t get_total_capacity_bytes_for_policy()
+{
+    const uint64_t bucket_size_bytes = ComputeEffectiveBucketSizeBytes(capacity_mode, is_bucket_size_explicit, static_cast<uint64_t>(bucket_block_count), static_cast<uint64_t>(s3fs_block_size));
+    const CapacityResult capacity = ComputeCapacity(capacity_mode, static_cast<uint64_t>(bucket_block_count), bucket_size_bytes, 0, static_cast<uint64_t>(s3fs_block_size));
+    return capacity.total_bytes;
+}
+
 static bool add_used_bytes_delta_for_capacity_policy(int64_t delta, const char* path)
 {
     if(delta == 0 || capacity_mode != CapacityMode::Redis){
@@ -3260,6 +3308,42 @@ static bool add_used_bytes_delta_for_capacity_policy(int64_t delta, const char* 
         return false;
     }
     return true;
+}
+
+static bool would_exceed_capacity_with_growth(uint64_t growth_bytes, const char* path)
+{
+    if(capacity_mode != CapacityMode::Redis || growth_bytes == 0){
+        return false;
+    }
+
+    const uint64_t used_bytes = get_used_bytes_for_capacity_policy();
+    const uint64_t total_bytes = get_total_capacity_bytes_for_policy();
+    if(total_bytes == 0){
+        return false;
+    }
+
+    const uint64_t remaining_bytes = (used_bytes >= total_bytes) ? 0 : (total_bytes - used_bytes);
+    if(growth_bytes > remaining_bytes){
+        S3FS_PRN_WARN("capacity limit exceeded [path=%s][used=%llu][growth=%llu][total=%llu]", SAFESTRPTR(path), static_cast<unsigned long long>(used_bytes), static_cast<unsigned long long>(growth_bytes), static_cast<unsigned long long>(total_bytes));
+        return true;
+    }
+    return false;
+}
+
+static bool ensure_capacity_for_resize(off_t uploaded_size, off_t target_size, const char* path)
+{
+    if(capacity_mode != CapacityMode::Redis){
+        return true;
+    }
+
+    const off_t normalized_uploaded = std::max<off_t>(uploaded_size, 0);
+    const off_t normalized_target = std::max<off_t>(target_size, 0);
+    if(normalized_target <= normalized_uploaded){
+        return true;
+    }
+
+    const uint64_t growth_bytes = static_cast<uint64_t>(normalized_target - normalized_uploaded);
+    return !would_exceed_capacity_with_growth(growth_bytes, path);
 }
 
 static bool try_get_object_size_for_capacity(const char* path, off_t& size)

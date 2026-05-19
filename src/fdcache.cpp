@@ -77,7 +77,6 @@ static constexpr char NOCACHE_PATH_PREFIX_FORM[] = " __S3FS_UNEXISTED_PATH_%lx__
 //------------------------------------------------
 // FdManager class variable
 //------------------------------------------------
-FdManager       FdManager::singleton;
 std::mutex      FdManager::fd_manager_lock;
 std::mutex      FdManager::cache_cleanup_lock;
 std::mutex      FdManager::reserved_diskspace_lock;
@@ -188,7 +187,7 @@ bool FdManager::MakeCachePath(const char* path, std::string& cache_path, bool is
 
     if(is_create_dir){
         int result;
-        if(0 != (result = mkdirp(resolved_path + (path == nullptr ? "" : mydirname(path)), 0777))){
+        if(0 != (result = mkdirp(resolved_path + (path == nullptr ? "" : mydirname(path)), 0700))){
             S3FS_PRN_ERR("failed to create dir(%s) by errno(%d).", path, result);
             return false;
         }
@@ -435,7 +434,7 @@ bool FdManager::HasOpenEntityFd(const char* path)
 
     const FdEntity* ent;
     int         fd = -1;
-    if(nullptr == (ent = FdManager::singleton.GetFdEntityHasLock(path, fd, false))){
+    if(nullptr == (ent = FdManager::get()->GetFdEntityHasLock(path, fd, false))){
         return false;
     }
     return (0 < ent->GetOpenCount());
@@ -448,31 +447,20 @@ int FdManager::GetOpenFdCount(const char* path)
 {
     const std::lock_guard<std::mutex> lock(FdManager::fd_manager_lock);
 
-    return FdManager::singleton.GetPseudoFdCount(path);
+    return FdManager::get()->GetPseudoFdCount(path);
 }
 
 //------------------------------------------------
 // FdManager methods
 //------------------------------------------------
-FdManager::FdManager()
-{
-    if(this != FdManager::get()){
-        abort();
-    }
-}
-
 FdManager::~FdManager()
 {
-    if(this == FdManager::get()){
-        for(auto iter = fent.cbegin(); fent.cend() != iter; ++iter){
-            const FdEntity* ent = iter->second.get();
-            S3FS_PRN_WARN("To exit with the cache file opened: path=%s, refcnt=%d", ent->GetPath().c_str(), ent->GetOpenCount());
-        }
-        fent.clear();
-        except_fent.clear();
-    }else{
-        abort();
+    for(auto iter = fent.cbegin(); fent.cend() != iter; ++iter){
+        const FdEntity* ent = iter->second.get();
+        S3FS_PRN_WARN("To exit with the cache file opened: path=%s, refcnt=%d", ent->GetPath().c_str(), ent->GetOpenCount());
     }
+    fent.clear();
+    except_fent.clear();
 }
 
 FdEntity* FdManager::GetFdEntityHasLock(const char* path, int& existfd, bool newfd)
@@ -504,7 +492,7 @@ FdEntity* FdManager::GetFdEntityHasLock(const char* path, int& existfd, bool new
 
     if(-1 != existfd){
         for(auto iter = fent.cbegin(); iter != fent.cend(); ++iter){
-            if(iter->second && 
+            if(iter->second &&
               iter->second->GetROPath() == path &&
               iter->second->FindPseudoFd(existfd)){
                 // found opened fd in map
@@ -629,14 +617,14 @@ FdEntity* FdManager::GetExistFdEntity(const char* path, int existfd)
     UpdateEntityToTempPath();
 
     // If use_cache is disabled, or the disk space is insufficient when use_cache
-    // is enabled, the corresponding key of the entity in fent is not path. 
+    // is enabled, the corresponding key of the entity in fent is not path.
     auto iter = fent.find(std::string(path));
     if(fent.end() != iter){
       if(iter->second && iter->second->FindPseudoFd(existfd)){
         return iter->second.get();
       }
     } else {
-      // no matter use_cache is enabled or not, search from all entities to 
+      // no matter use_cache is enabled or not, search from all entities to
       // find the entity with the same path. And then compare the pseudo fd.
       for(iter = fent.begin(); iter != fent.end(); ++iter) {
         // GetROPath() holds ro_path_lock rather than fdent_lock.
@@ -912,7 +900,7 @@ void FdManager::FreeReservedDiskSpace(off_t size)
 
 //
 // Inspect all files for stats file for cache file
-// 
+//
 // [NOTE]
 // The minimum sub_path parameter is "/".
 // The sub_path is a directory path starting from "/" and ending with "/".

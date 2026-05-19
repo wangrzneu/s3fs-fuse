@@ -128,7 +128,7 @@ elif [ "${CONTAINER_FULLNAME}" = "ubuntu:24.04" ]; then
         libxml2-dev
         locales-all
         mailcap
-        openjdk-21-jre-headless
+        openjdk-25-jre-headless
         pkg-config
     )
 
@@ -154,7 +154,7 @@ elif [ "${CONTAINER_FULLNAME}" = "ubuntu:22.04" ]; then
         libxml2-dev
         locales-all
         mime-support
-        openjdk-21-jre-headless
+        openjdk-25-jre-headless
         pkg-config
     )
 
@@ -182,7 +182,7 @@ elif [ "${CONTAINER_FULLNAME}" = "debian:trixie" ]; then
         libxml2-dev
         locales-all
         mailcap
-        openjdk-21-jre-headless
+        openjdk-25-jre-headless
         pkg-config
         procps
     )
@@ -242,7 +242,7 @@ elif [ "${CONTAINER_FULLNAME}" = "rockylinux/rockylinux:10" ] ||
         gcc-c++
         git
         glibc-langpack-en
-        java-21-openjdk-headless
+        java-25-openjdk-headless
         jq
         libstdc++-devel
         libxml2-devel
@@ -318,8 +318,7 @@ elif [ "${CONTAINER_FULLNAME}" = "fedora:44" ] ||
         procps
     )
 
-elif [ "${CONTAINER_FULLNAME}" = "opensuse/leap:15" ] ||
-     [ "${CONTAINER_FULLNAME}" = "opensuse/leap:16.0" ]; then
+elif [ "${CONTAINER_FULLNAME}" = "opensuse/leap:16.0" ]; then
     PACKAGE_MANAGER_BIN="zypper"
     PACKAGE_UPDATE_OPTIONS="refresh"
     PACKAGE_INSTALL_OPTIONS="install -y"
@@ -364,7 +363,7 @@ elif [ "${CONTAINER_FULLNAME}" = "alpine:3.23" ]; then
         libxml2-dev
         mailcap
         make
-        openjdk21
+        openjdk25
         openssl
         perl-test-harness-utils
         procps

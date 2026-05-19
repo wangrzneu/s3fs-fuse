@@ -161,7 +161,7 @@ function test_mv_file {
        echo "Could not move file"
        return 1
     fi
-    
+
     #check the renamed file content-type
     if [ -f "/etc/mime.types" ]
     then
@@ -2124,8 +2124,29 @@ function test_truncate_cache() {
         ls "${dir}"
     done
 
-    # shellcheck disable=SC2046
-    rm -rf $(seq 2)
+    # NOTE: Related Issue #2833
+    # When using macos-fuse-t to delete multiple directories containing files in bulk,
+    # the command to delete directories may be called before the files are deleted,
+    # sometimes resulting in failure.
+    # Until this issue is resolved, please delete directories one by one.
+    #
+    # On macOS with -o update_parent_dir_stat there is a second race: each
+    # unlink schedules an async update_mctime_parent_directory PUT against
+    # the parent directory marker. If rm advances to rmdir before that PUT
+    # settles, s3fs_rmdir's check_parent_object_access can read a transient
+    # mode value out of the stat cache and return -EACCES (surfaces as
+    # "rm: <dir>: Permission denied"). Wait between iterations so the
+    # parent's metadata update is committed before the next rm runs.
+    #
+    if ! uname | grep -q Darwin; then
+        # shellcheck disable=SC2046
+        rm -rf $(seq 2)
+    else
+        for dir in $(seq 2); do
+            rm -rf "${dir}"
+            wait_ostype 1 "Darwin"
+        done
+    fi
 }
 
 function test_cache_file_stat() {

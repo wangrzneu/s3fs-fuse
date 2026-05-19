@@ -38,7 +38,7 @@
 // Typedef
 //----------------------------------------------
 class PseudoFdInfo;
-typedef std::map<int, std::unique_ptr<PseudoFdInfo>> fdinfo_map_t;
+using fdinfo_map_t = std::map<int, std::unique_ptr<PseudoFdInfo>>;
 
 //------------------------------------------------
 // class FdEntity
@@ -149,7 +149,7 @@ class FdEntity : public std::enable_shared_from_this<FdEntity>
         }
         int Open(const headers_t* pmeta, off_t size, const FileTimes& ts_times, int flags);
 
-        bool LoadAll(int fd, off_t* size = nullptr, bool force_load = false);
+        int LoadAll(int fd, off_t* size = nullptr, bool force_load = false);
         int Dup(int fd) {
             const std::lock_guard<std::mutex> lock(fdent_lock);
             return DupWithLock(fd);
@@ -253,7 +253,7 @@ class FdEntity : public std::enable_shared_from_this<FdEntity>
         std::mutex* GetMutex() RETURN_CAPABILITY(fdent_lock);
 };
 
-typedef std::map<std::string, std::shared_ptr<FdEntity>> fdent_map_t;           // key=path, value=FdEntity
+using fdent_map_t = std::map<std::string, std::shared_ptr<FdEntity>>;           // key=path, value=FdEntity
 
 #endif // S3FS_FDCACHE_ENTITY_H_
 

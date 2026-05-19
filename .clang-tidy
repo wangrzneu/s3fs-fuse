@@ -17,7 +17,6 @@ Checks: '
     -cert-env33-c,
     -cert-err33-c,
     -cert-err58-cpp,
-    -clang-analyzer-security.insecureAPI.strcpy,
     -clang-analyzer-unix.BlockInCriticalSection,
     -concurrency-mt-unsafe,
     -cppcoreguidelines-avoid-c-arrays,
@@ -61,7 +60,6 @@ Checks: '
     -modernize-return-braced-init-list,
     -modernize-use-default-member-init,
     -modernize-use-trailing-return-type,
-    -modernize-use-using,
     -performance-avoid-endl,
     -performance-no-int-to-ptr,
     -readability-avoid-nested-conditional-operator,
@@ -83,5 +81,6 @@ CheckOptions:
     bugprone-implicit-widening-of-multiplication-result.IgnoreConstantIntExpr: 'true'
     cppcoreguidelines-narrowing-conversions.WarnOnEquivalentBitWidth: 'false'
     misc-include-cleaner.MissingIncludes: 'false'
+    modernize-use-using.IgnoreExternC: 'true'
     readability-implicit-bool-conversion.AllowIntegerConditions: 'true'
     readability-implicit-bool-conversion.AllowPointerConditions: 'true'

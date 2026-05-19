@@ -32,7 +32,7 @@
 //----------------------------------------------
 // Typedefs
 //----------------------------------------------
-typedef std::map<std::string, std::string> iamcredmap_t;
+using iamcredmap_t = std::map<std::string, std::string>;
 
 //------------------------------------------------
 // class S3fsCred
@@ -168,6 +168,12 @@ class S3fsCred
         static bool CheckForbiddenBucketParams();
 
     public:
+        static S3fsCred* get()
+        {
+            static S3fsCred s3fscred;
+            return &s3fscred;
+        }
+
         static bool SetBucket(const std::string& bucket);
         static const std::string& GetBucket();
 

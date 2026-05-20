@@ -2396,9 +2396,22 @@ bool S3fsCurl::insertV4Headers(const std::string& access_key_id, const std::stri
     }
 
     if(!S3fsCurl::IsPublicBucket()){
+        // [SIGNDBG] dump all requestHeaders that will go into the canonical request + SignedHeaders set
+        {
+            std::string _hdrdump;
+            for(struct curl_slist* _h = requestHeaders; _h != nullptr; _h = _h->next){
+                _hdrdump += "  [hdr] ";
+                _hdrdump += _h->data;
+                _hdrdump += "\n";
+            }
+            S3FS_PRN_ERR("[SIGNDBG] op=%s path=%s qs=%s SignedHeaders=%s\n%s",
+                op.c_str(), realpath.c_str(), query_string.c_str(),
+                get_sorted_header_keys(requestHeaders).c_str(), _hdrdump.c_str());
+        }
         std::string Signature = CalcSignature(op, realpath, query_string + (type == REQTYPE::PREMULTIPOST || type == REQTYPE::MULTILIST ? "=" : ""), strdate, contentSHA256, date8601, secret_access_key, access_token);
         std::string auth = "AWS4-HMAC-SHA256 Credential=" + access_key_id + "/" + strdate + "/" + region + "/s3/aws4_request, SignedHeaders=" + get_sorted_header_keys(requestHeaders) + ", Signature=" + Signature;
         requestHeaders = curl_slist_sort_insert(requestHeaders, "Authorization", auth.c_str());
+        S3FS_PRN_ERR("[SIGNDBG] op=%s path=%s Signature=%s", op.c_str(), realpath.c_str(), Signature.c_str());
     }
 
     return true;
